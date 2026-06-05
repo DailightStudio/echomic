@@ -13,6 +13,7 @@ final class AudioEngine {
     private let reverb = AVAudioUnitReverb()
     private let echo = EchoEffect()
     private let comp = Compressor()
+    private let suppressor = FeedbackSuppressor()
 
     private var gain: Float = 1.0
     private(set) var isRunning = false
@@ -82,6 +83,9 @@ final class AudioEngine {
 
             comp.prepare(sampleRate: Float(format.sampleRate))
             comp.reset()
+
+            suppressor.prepare(sampleRate: Float(format.sampleRate),
+                               channelCount: Int(format.channelCount))
 
             engine.attach(player)
             engine.attach(reverb)
@@ -300,6 +304,7 @@ final class AudioEngine {
             comp.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
             echo.process(ptr.baseAddress!, frameCount: frameCount, gain: gain)
             comp.limit(ptr.baseAddress!, count: frameCount * channels)
+            suppressor.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
         }
 
         // Apply master volume.
