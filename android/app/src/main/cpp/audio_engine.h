@@ -8,6 +8,8 @@
 #include <oboe/Oboe.h>
 
 #include "echo_effect.h"
+#include "compressor.h"
+#include "reverb.h"
 
 /**
  * Full-duplex low-latency engine built on two Oboe streams.
@@ -29,6 +31,10 @@ public:
     void setGain(float gain) { gain_.store(gain); }
     void setEchoDelay(float delayMs) { echo_.setDelayMs(delayMs); }
     void setEchoFeedback(float feedback) { echo_.setFeedback(feedback); }
+    void setReverbWet(float wet)      { reverb_.setWet(wet); }
+    void setMasterGain(float gain)    { masterGain_.store(gain); }
+    float getRmsLevel() const         { return rmsLevel_.load(); }
+    bool isRunning() const            { return running_.load(); }
 
     // oboe::AudioStreamDataCallback
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream,
@@ -46,6 +52,10 @@ private:
     std::shared_ptr<oboe::AudioStream> outputStream_;
 
     EchoEffect echo_;
+    Compressor comp_;
+    ReverbEffect reverb_;
+    std::atomic<float> masterGain_{1.0f};
+    std::atomic<float> rmsLevel_{0.0f};
     std::atomic<float> gain_{1.0f};
 
     // Lock-free single-producer/single-consumer ring buffer of float samples

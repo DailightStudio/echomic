@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'audio_engine.dart';
 
@@ -20,6 +25,69 @@ class _HomeScreenState extends State<HomeScreen> {
   double _gain = 1.0;
   double _echoDelayMs = 150.0;
   double _echoFeedback = 0.3;
+  double _reverbMix = 0.0;
+  double _masterVolume = 1.0;
+  double _rmsLevel = 0.0; // 0.0~1.0 선형
+  StreamSubscription? _eventSub;
+
+  DateTime? _lastParamSend;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPrefs();
+    _eventSub = _engine.audioEvents.listen((event) {
+      if (!mounted) return;
+      final type = event['type'] as String?;
+      if (type == 'level') {
+        setState(() => _rmsLevel =
+            (event['rms'] as double? ?? 0.0).clamp(0.0, 1.0));
+      } else if (type == 'state') {
+        final running = event['running'] as bool? ?? false;
+        if (!running && _running) {
+          setState(() {
+            _running = false;
+            _status = '오디오 장치 연결 끊김';
+          });
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadPrefs() async {
+    final p = await SharedPreferences.getInstance();
+    setState(() {
+      _gain = p.getDouble('gain') ?? 1.0;
+      _echoDelayMs = p.getDouble('echoDelayMs') ?? 150.0;
+      _echoFeedback = p.getDouble('echoFeedback') ?? 0.3;
+      _reverbMix = p.getDouble('reverbMix') ?? 0.0;
+      _masterVolume = p.getDouble('masterVolume') ?? 1.0;
+    });
+  }
+
+  Future<void> _savePrefs() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setDouble('gain', _gain);
+    await p.setDouble('echoDelayMs', _echoDelayMs);
+    await p.setDouble('echoFeedback', _echoFeedback);
+    await p.setDouble('reverbMix', _reverbMix);
+    await p.setDouble('masterVolume', _masterVolume);
+  }
+
+  void _sendParam(VoidCallback send) {
+    final now = DateTime.now();
+    if (_lastParamSend == null ||
+        now.difference(_lastParamSend!) > const Duration(milliseconds: 50)) {
+      _lastParamSend = now;
+      send();
+    }
+  }
 
   Future<void> _toggle() async {
     if (_busy) return;
@@ -27,29 +95,44 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       if (_running) {
         await _engine.stop();
+        WakelockPlus.disable();
         setState(() {
           _running = false;
-          _status = 'Stopped';
+          _status = '정지됨';
         });
       } else {
         final PermissionStatus mic = await Permission.microphone.request();
         if (!mic.isGranted) {
-          setState(() => _status = 'Microphone permission denied');
+          setState(() => _status = '마이크 권한이 필요합니다');
           return;
         }
-        // Push current parameter values before starting the stream.
+
+        // 스피커 경고
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  '🎧 이어폰 사용을 권장합니다 — 스피커 사용 시 하울링이 발생할 수 있습니다'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+
         await _engine.setGain(_gain);
         await _engine.setEchoDelay(_echoDelayMs);
         await _engine.setEchoFeedback(_echoFeedback);
+        await _engine.setReverbMix(_reverbMix);
+        await _engine.setMasterVolume(_masterVolume);
 
         final bool ok = await _engine.start();
+        if (ok) WakelockPlus.enable();
         setState(() {
           _running = ok;
-          _status = ok ? 'Running (low latency)' : 'Failed to start engine';
+          _status = ok ? '실행 중 (저지연)' : '엔진 시작 실패';
         });
       }
     } catch (e) {
-      setState(() => _status = 'Error: $e');
+      setState(() => _status = '오류: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -81,7 +164,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
+              _LevelMeter(level: _rmsLevel),
+              const SizedBox(height: 16),
               _SliderTile(
                 label: 'Gain',
                 value: _gain,
@@ -90,8 +175,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 valueLabel: '${_gain.toStringAsFixed(2)}x',
                 onChanged: (v) {
                   setState(() => _gain = v);
-                  _engine.setGain(v);
+                  _sendParam(() => _engine.setGain(v));
                 },
+                onChangeEnd: (_) => _savePrefs(),
               ),
               _SliderTile(
                 label: 'Echo Delay',
@@ -101,8 +187,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 valueLabel: '${_echoDelayMs.round()} ms',
                 onChanged: (v) {
                   setState(() => _echoDelayMs = v);
-                  _engine.setEchoDelay(v);
+                  _sendParam(() => _engine.setEchoDelay(v));
                 },
+                onChangeEnd: (_) => _savePrefs(),
               ),
               _SliderTile(
                 label: 'Echo Feedback',
@@ -112,8 +199,33 @@ class _HomeScreenState extends State<HomeScreen> {
                 valueLabel: _echoFeedback.toStringAsFixed(2),
                 onChanged: (v) {
                   setState(() => _echoFeedback = v);
-                  _engine.setEchoFeedback(v);
+                  _sendParam(() => _engine.setEchoFeedback(v));
                 },
+                onChangeEnd: (_) => _savePrefs(),
+              ),
+              _SliderTile(
+                label: 'Reverb',
+                value: _reverbMix,
+                min: 0.0,
+                max: 1.0,
+                valueLabel: '${(_reverbMix * 100).round()}%',
+                onChanged: (v) {
+                  setState(() => _reverbMix = v);
+                  _sendParam(() => _engine.setReverbMix(v));
+                },
+                onChangeEnd: (_) => _savePrefs(),
+              ),
+              _SliderTile(
+                label: 'Volume',
+                value: _masterVolume,
+                min: 0.0,
+                max: 1.0,
+                valueLabel: '${(_masterVolume * 100).round()}%',
+                onChanged: (v) {
+                  setState(() => _masterVolume = v);
+                  _sendParam(() => _engine.setMasterVolume(v));
+                },
+                onChangeEnd: (_) => _savePrefs(),
               ),
               const Spacer(),
               SizedBox(
@@ -147,6 +259,7 @@ class _SliderTile extends StatelessWidget {
     required this.max,
     required this.valueLabel,
     required this.onChanged,
+    this.onChangeEnd,
   });
 
   final String label;
@@ -155,6 +268,7 @@ class _SliderTile extends StatelessWidget {
   final double max;
   final String valueLabel;
   final ValueChanged<double> onChanged;
+  final ValueChanged<double>? onChangeEnd; // nullable
 
   @override
   Widget build(BuildContext context) {
@@ -173,8 +287,56 @@ class _SliderTile extends StatelessWidget {
           min: min,
           max: max,
           onChanged: onChanged,
+          onChangeEnd: onChangeEnd,
         ),
       ],
+    );
+  }
+}
+
+class _LevelMeter extends StatelessWidget {
+  const _LevelMeter({required this.level});
+  final double level; // 0.0~1.0 선형 RMS
+
+  @override
+  Widget build(BuildContext context) {
+    // dBFS 변환 (-60~0), 0이면 -60
+    final db =
+        level > 0 ? (20 * (log(level) / log(10))).clamp(-60.0, 0.0) : -60.0;
+    final fraction = ((db + 60) / 60).clamp(0.0, 1.0); // 0~1
+
+    final color = fraction > 0.85
+        ? Colors.red
+        : fraction > 0.65
+            ? Colors.orange
+            : Colors.greenAccent;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Level', style: Theme.of(context).textTheme.titleSmall),
+              Text('${db.toStringAsFixed(1)} dB',
+                  style: Theme.of(context).textTheme.titleSmall),
+            ],
+          ),
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: fraction,
+              minHeight: 10,
+              backgroundColor:
+                  Theme.of(context).colorScheme.surfaceContainerHighest,
+              valueColor: AlwaysStoppedAnimation<Color>(color),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

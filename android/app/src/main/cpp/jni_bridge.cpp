@@ -55,4 +55,30 @@ Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetEchoFeedback(
     }
 }
 
+JNIEXPORT jfloat JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeGetRmsLevel(JNIEnv * /*env*/,
+                                                                     jobject /*thiz*/) {
+    return gEngine ? static_cast<jfloat>(gEngine->getRmsLevel()) : 0.0f;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeIsRunning(JNIEnv * /*env*/,
+                                                                   jobject /*thiz*/) {
+    return (gEngine && gEngine->isRunning()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetReverbWet(JNIEnv * /*env*/,
+                                                                      jobject /*thiz*/,
+                                                                      jfloat wet) {
+    if (gEngine) gEngine->setReverbWet(static_cast<float>(wet));
+}
+
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetMasterGain(JNIEnv * /*env*/,
+                                                                       jobject /*thiz*/,
+                                                                       jfloat gain) {
+    if (gEngine) gEngine->setMasterGain(static_cast<float>(gain));
+}
+
 }  // extern "C"

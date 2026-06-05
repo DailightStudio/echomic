@@ -3,6 +3,7 @@
 #include <android/log.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #define LOG_TAG "EchomicEngine"
@@ -39,7 +40,7 @@ bool AudioEngine::openStreams() {
         ->setSharingMode(oboe::SharingMode::Exclusive)
         ->setFormat(oboe::AudioFormat::Float)
         ->setChannelCount(oboe::ChannelCount::Mono)
-        ->setDataCallback(nullptr)        // output is pulled by us in the input cb
+        ->setDataCallback(this)
         ->setErrorCallback(this)
         ->setUsage(oboe::Usage::VoiceCommunication);
 
@@ -73,6 +74,12 @@ bool AudioEngine::openStreams() {
     // Prepare the echo delay line for the negotiated format.
     echo_.prepare(sampleRate_, channelCount_);
     echo_.reset();
+
+    comp_.prepare(sampleRate_);
+    comp_.reset();
+
+    reverb_.prepare(sampleRate_);
+    reverb_.reset();
 
     // FIFO holds ~200 ms of audio; plenty of headroom over the callback size.
     const int frames = std::max(sampleRate_ / 5, 2048);
@@ -122,7 +129,21 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream *stream,
     if (stream->getDirection() == oboe::Direction::Input) {
         // Process mic input then push into the FIFO for the output stream.
         auto *in = static_cast<float *>(audioData);
-        echo_.process(in, numFrames, gain_.load());
+        comp_.process(in, numFrames, channels);      // compress first
+        echo_.process(in, numFrames, gain_.load());  // then echo
+        reverb_.process(in, numFrames, channels);    // then reverb
+        comp_.limit(in, numFrames * channels);       // then limit
+
+        // 마스터볼륨
+        const float master = masterGain_.load();
+        if (master < 0.9999f) {
+            for (int i = 0; i < sampleCount; ++i) in[i] *= master;
+        }
+
+        // RMS 계산 (UI 폴링용)
+        float sumSq = 0.0f;
+        for (int i = 0; i < sampleCount; ++i) sumSq += in[i] * in[i];
+        rmsLevel_.store(std::sqrt(sumSq / static_cast<float>(sampleCount)));
 
         int writeIdx = fifoWrite_.load(std::memory_order_relaxed);
         const int readIdx = fifoRead_.load(std::memory_order_acquire);
@@ -155,7 +176,8 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream *stream,
 void AudioEngine::onErrorAfterClose(oboe::AudioStream * /*stream*/,
                                     oboe::Result error) {
     LOGE("Stream error after close: %s", oboe::convertToText(error));
-    // Disconnected device (e.g. headset unplugged). Mark stopped; the UI can
-    // restart explicitly.
+    std::lock_guard<std::mutex> lock(lifecycleLock_);
     running_.store(false);
+    inputStream_.reset();
+    outputStream_.reset();
 }
