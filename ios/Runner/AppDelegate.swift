@@ -9,8 +9,9 @@ import UIKit
     ) -> Bool {
         GeneratedPluginRegistrant.register(with: self)
 
-        let registrar = self.registrar(forPlugin: "AudioEnginePlugin")
-        AudioEnginePlugin.register(with: registrar.messenger())
+        if let registrar = self.registrar(forPlugin: "AudioEnginePlugin") {
+            AudioEnginePlugin.register(with: registrar.messenger())
+        }
 
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
