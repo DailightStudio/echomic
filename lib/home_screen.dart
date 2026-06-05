@@ -182,7 +182,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 label: 'Gain',
                 value: _gain,
                 min: 1.0,
-                max: 4.0,
+                max: 8.0,
                 valueLabel: '${_gain.toStringAsFixed(2)}x',
                 onChanged: (v) {
                   setState(() => _gain = v);
