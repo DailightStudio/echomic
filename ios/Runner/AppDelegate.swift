@@ -9,9 +9,8 @@ import UIKit
     ) -> Bool {
         GeneratedPluginRegistrant.register(with: self)
 
-        if let controller = window?.rootViewController as? FlutterViewController {
-            AudioEnginePlugin.register(with: controller.binaryMessenger)
-        }
+        let registrar = self.registrar(forPlugin: "AudioEnginePlugin")
+        AudioEnginePlugin.register(with: registrar.messenger())
 
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
