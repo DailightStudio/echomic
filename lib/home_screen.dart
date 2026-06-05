@@ -36,22 +36,33 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _loadPrefs();
-    _eventSub = _engine.audioEvents.listen((event) {
-      if (!mounted) return;
-      final type = event['type'] as String?;
-      if (type == 'level') {
-        setState(() => _rmsLevel =
-            (event['rms'] as double? ?? 0.0).clamp(0.0, 1.0));
-      } else if (type == 'state') {
-        final running = event['running'] as bool? ?? false;
-        if (!running && _running) {
-          setState(() {
-            _running = false;
-            _status = '오디오 장치 연결 끊김';
-          });
-        }
-      }
-    });
+    try {
+      _eventSub = _engine.audioEvents.listen(
+        (event) {
+          if (!mounted) return;
+          final type = event['type'] as String?;
+          if (type == 'level') {
+            setState(() => _rmsLevel =
+                (event['rms'] as double? ?? 0.0).clamp(0.0, 1.0));
+          } else if (type == 'state') {
+            final running = event['running'] as bool? ?? false;
+            if (!running && _running) {
+              setState(() {
+                _running = false;
+                _status = '오디오 장치 연결 끊김';
+              });
+            }
+          }
+        },
+        onError: (Object error) {
+          if (!mounted) return;
+          setState(() => _status = '이벤트 채널 오류: $error');
+        },
+      );
+    } catch (e) {
+      // 네이티브 이벤트 채널이 아직 준비되지 않았더라도 UI는 계속 렌더링한다.
+      _status = '이벤트 채널 초기화 실패: $e';
+    }
   }
 
   @override
