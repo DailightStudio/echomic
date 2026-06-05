@@ -85,7 +85,7 @@ final class AudioEngine {
 
             engine.attach(player)
             engine.attach(reverb)
-            reverb.loadFactoryPreset(.hall)
+            reverb.loadFactoryPreset(.largeHall)
             reverb.wetDryMix = 0  // off by default
             engine.connect(player, to: reverb, format: format)
             engine.connect(reverb, to: engine.mainMixerNode, format: format)
