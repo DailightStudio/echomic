@@ -5,14 +5,10 @@ import UIKit
 @objc class AppDelegate: FlutterAppDelegate {
     override func application(
         _ application: UIApplication,
-        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
-    ) -> Bool {
-        GeneratedPluginRegistrant.register(with: self)
-
-        if let registrar = self.registrar(forPlugin: "AudioEnginePlugin") {
-            AudioEnginePlugin.register(with: registrar.messenger())
-        }
-
-        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        UISceneConfiguration(name: "Default Configuration",
+                             sessionRole: connectingSceneSession.role)
     }
 }

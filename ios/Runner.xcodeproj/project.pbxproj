@@ -15,6 +15,7 @@
 		A10000031ED2DC5600515810 /* AudioEnginePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000021ED2DC5600515810 /* AudioEnginePlugin.swift */; };
 		A10000051ED2DC5600515810 /* Compressor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000041ED2DC5600515810 /* Compressor.swift */; };
 		A10000071ED2DC5600515810 /* EchoEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000061ED2DC5600515810 /* EchoEffect.swift */; };
+		A10000091ED2DC5600515810 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000081ED2DC5600515810 /* SceneDelegate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -46,6 +47,7 @@
 		A10000021ED2DC5600515810 /* AudioEnginePlugin.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AudioEnginePlugin.swift; sourceTree = "<group>"; };
 		A10000041ED2DC5600515810 /* Compressor.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Compressor.swift; sourceTree = "<group>"; };
 		A10000061ED2DC5600515810 /* EchoEffect.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = EchoEffect.swift; sourceTree = "<group>"; };
+		A10000081ED2DC5600515810 /* SceneDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -100,6 +102,7 @@
 				A10000021ED2DC5600515810 /* AudioEnginePlugin.swift */,
 				A10000041ED2DC5600515810 /* Compressor.swift */,
 				A10000061ED2DC5600515810 /* EchoEffect.swift */,
+				A10000081ED2DC5600515810 /* SceneDelegate.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -217,6 +220,7 @@
 				A10000031ED2DC5600515810 /* AudioEnginePlugin.swift in Sources */,
 				A10000051ED2DC5600515810 /* Compressor.swift in Sources */,
 				A10000071ED2DC5600515810 /* EchoEffect.swift in Sources */,
+				A10000091ED2DC5600515810 /* SceneDelegate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
