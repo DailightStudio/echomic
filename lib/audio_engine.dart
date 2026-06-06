@@ -76,4 +76,9 @@ class AudioEngine {
   Future<void> setEQBand(int band, double gainDb) async {
     await _channel.invokeMethod<void>('setEQBand', {'band': band, 'gainDb': gainDb});
   }
+
+  /// Enable or disable the SSB frequency shifter (anti-feedback).
+  Future<void> setFrequencyShift(bool enabled) async {
+    await _channel.invokeMethod<void>('setFrequencyShift', {'enabled': enabled});
+  }
 }

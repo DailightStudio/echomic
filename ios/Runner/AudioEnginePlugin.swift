@@ -71,6 +71,11 @@ final class AudioEnginePlugin: NSObject {
                 engine.setEQBand(band, gainDb: Float(gainDb))
             }
             result(nil)
+        case "setFrequencyShift":
+            if let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool {
+                engine.setFrequencyShiftEnabled(enabled)
+            }
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }

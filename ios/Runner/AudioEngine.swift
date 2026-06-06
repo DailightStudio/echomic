@@ -15,6 +15,7 @@ final class AudioEngine {
     private let echo = EchoEffect()
     private let comp = Compressor()
     private let suppressor = FeedbackSuppressor()
+    private let freqShifter = FrequencyShifter()
     private let hpf  = HighPassFilter()
     private let gate = NoiseGate()
 
@@ -53,6 +54,8 @@ final class AudioEngine {
     func setMasterVolume(_ volume: Float) { masterVolume = min(max(volume, 0), 1) }
 
     func setGateThreshold(_ db: Float) { gate.setThresholdDb(db) }
+
+    func setFrequencyShiftEnabled(_ enabled: Bool) { freqShifter.enabled = enabled }
 
     func setEQBand(_ band: Int, gainDb: Float) {
         guard band >= 0, band < eq.bands.count else { return }
@@ -96,6 +99,7 @@ final class AudioEngine {
 
             suppressor.prepare(sampleRate: Float(format.sampleRate),
                                channelCount: Int(format.channelCount))
+            freqShifter.prepare(sampleRate: Float(format.sampleRate))
 
             hpf.prepare(sampleRate: Float(format.sampleRate))
             gate.prepare(sampleRate: Float(format.sampleRate))
@@ -341,6 +345,7 @@ final class AudioEngine {
             echo.process(ptr.baseAddress!, frameCount: frameCount, gain: gain)
             comp.limit(ptr.baseAddress!, count: frameCount * channels)
             suppressor.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
+            freqShifter.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
         }
 
         // Apply master volume.

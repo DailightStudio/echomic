@@ -29,6 +29,7 @@ class _HomeScreenState extends State<HomeScreen> {
   double _masterVolume = 1.0;
   double _gateThresholdDb = -34.0;
   final List<double> _eqGains = [0.0, 0.0, 0.0, 0.0, 0.0]; // dB per band
+  bool _freqShiftEnabled = true;
   double _rmsLevel = 0.0; // 0.0~1.0 선형
   StreamSubscription? _eventSub;
 
@@ -85,6 +86,7 @@ class _HomeScreenState extends State<HomeScreen> {
       for (int i = 0; i < 5; i++) {
         _eqGains[i] = p.getDouble('eq$i') ?? 0.0;
       }
+      _freqShiftEnabled = p.getBool('freqShift') ?? true;
     });
   }
 
@@ -99,6 +101,7 @@ class _HomeScreenState extends State<HomeScreen> {
     for (int i = 0; i < 5; i++) {
       await p.setDouble('eq$i', _eqGains[i]);
     }
+    await p.setBool('freqShift', _freqShiftEnabled);
   }
 
   void _sendParam(VoidCallback send) {
@@ -148,6 +151,7 @@ class _HomeScreenState extends State<HomeScreen> {
         for (int i = 0; i < 5; i++) {
           await _engine.setEQBand(i, _eqGains[i]);
         }
+        await _engine.setFrequencyShift(_freqShiftEnabled);
 
         final bool ok = await _engine.start();
         if (ok) WakelockPlus.enable();
@@ -271,6 +275,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   _sendParam(() => _engine.setEQBand(band, v));
                 },
                 onChangeEnd: (_) => _savePrefs(),
+              ),
+              SwitchListTile(
+                title: const Text('Anti-Feedback (Freq. Shift)'),
+                subtitle: const Text('8 Hz shift — breaks feedback loop'),
+                value: _freqShiftEnabled,
+                onChanged: (v) {
+                  setState(() => _freqShiftEnabled = v);
+                  _engine.setFrequencyShift(v);
+                  _savePrefs();
+                },
+                dense: true,
               ),
               const Spacer(),
               SizedBox(
