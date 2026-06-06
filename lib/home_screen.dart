@@ -22,13 +22,13 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _busy = false;
   String _status = 'Idle';
 
-  double _gain = 1.0;
-  double _echoDelayMs = 150.0;
-  double _echoFeedback = 0.3;
+  double _gain = 2.0;
+  double _echoDelayMs = 0.0;
+  double _echoFeedback = 0.0;
   double _reverbMix = 0.0;
-  double _masterVolume = 1.0;
-  double _gateThresholdDb = -34.0;
-  final List<double> _eqGains = [0.0, 0.0, 0.0, 0.0, 0.0]; // dB per band
+  double _masterVolume = 0.8;
+  double _gateThresholdDb = -40.0;
+  final List<double> _eqGains = [-4.0, -2.0, 0.0, -4.0, 2.0]; // dB per band
   bool _freqShiftEnabled = true;
   double _rmsLevel = 0.0; // 0.0~1.0 선형
   StreamSubscription? _eventSub;
@@ -77,14 +77,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadPrefs() async {
     final p = await SharedPreferences.getInstance();
     setState(() {
-      _gain = p.getDouble('gain') ?? 1.0;
-      _echoDelayMs = p.getDouble('echoDelayMs') ?? 150.0;
-      _echoFeedback = p.getDouble('echoFeedback') ?? 0.3;
+      _gain = p.getDouble('gain') ?? 2.0;
+      _echoDelayMs = p.getDouble('echoDelayMs') ?? 0.0;
+      _echoFeedback = p.getDouble('echoFeedback') ?? 0.0;
       _reverbMix = p.getDouble('reverbMix') ?? 0.0;
-      _masterVolume = p.getDouble('masterVolume') ?? 1.0;
-      _gateThresholdDb = p.getDouble('gateThresholdDb') ?? -34.0;
+      _masterVolume = p.getDouble('masterVolume') ?? 0.8;
+      _gateThresholdDb = p.getDouble('gateThresholdDb') ?? -40.0;
+      const eqDefaults = [-4.0, -2.0, 0.0, -4.0, 2.0];
       for (int i = 0; i < 5; i++) {
-        _eqGains[i] = p.getDouble('eq$i') ?? 0.0;
+        _eqGains[i] = p.getDouble('eq$i') ?? eqDefaults[i];
       }
       _freqShiftEnabled = p.getBool('freqShift') ?? true;
     });
