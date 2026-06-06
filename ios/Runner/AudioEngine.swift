@@ -189,12 +189,28 @@ final class AudioEngine {
 
     private func configureSession() throws {
         let session = AVAudioSession.sharedInstance()
+        // .defaultToSpeaker removed — it overrides BT routing and forces phone
+        // speaker even when a Bluetooth speaker is connected.
         try session.setCategory(.playAndRecord,
                                 mode: .measurement,
-                                options: [.defaultToSpeaker, .allowBluetoothHFP])
+                                options: [.allowBluetoothHFP])
         try session.setPreferredIOBufferDuration(0.005)  // 5 ms
         try session.setPreferredSampleRate(48_000)
         try session.setActive(true)
+        applyOutputOverride()
+    }
+
+    /// Route to the built-in speaker when no Bluetooth output is active,
+    /// so the phone doesn't default to the tiny earpiece.
+    private func applyOutputOverride() {
+        let session = AVAudioSession.sharedInstance()
+        let btTypes: Set<AVAudioSession.Port> = [
+            .bluetoothA2DP, .bluetoothHFP, .bluetoothLE
+        ]
+        let hasBluetooth = session.currentRoute.outputs.contains {
+            btTypes.contains($0.portType)
+        }
+        try? session.overrideOutputAudioPort(hasBluetooth ? .none : .speaker)
     }
 
     // MARK: - Session recovery
@@ -285,6 +301,7 @@ final class AudioEngine {
     private func resumeEngine() {
         try? engine.start()
         player.play()
+        applyOutputOverride()
     }
 
     /// Runs gain + echo over the captured buffer and schedules it for playback.
