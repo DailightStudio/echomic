@@ -60,6 +60,11 @@ final class AudioEnginePlugin: NSObject {
                 engine.setMasterVolume(Float(volume))
             }
             result(nil)
+        case "setGateThreshold":
+            if let db = doubleArg(call, "db") {
+                engine.setGateThreshold(Float(db))
+            }
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }

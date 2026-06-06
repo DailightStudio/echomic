@@ -27,6 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
   double _echoFeedback = 0.3;
   double _reverbMix = 0.0;
   double _masterVolume = 1.0;
+  double _gateThresholdDb = -34.0;
   double _rmsLevel = 0.0; // 0.0~1.0 선형
   StreamSubscription? _eventSub;
 
@@ -79,6 +80,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _echoFeedback = p.getDouble('echoFeedback') ?? 0.3;
       _reverbMix = p.getDouble('reverbMix') ?? 0.0;
       _masterVolume = p.getDouble('masterVolume') ?? 1.0;
+      _gateThresholdDb = p.getDouble('gateThresholdDb') ?? -34.0;
     });
   }
 
@@ -89,6 +91,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await p.setDouble('echoFeedback', _echoFeedback);
     await p.setDouble('reverbMix', _reverbMix);
     await p.setDouble('masterVolume', _masterVolume);
+    await p.setDouble('gateThresholdDb', _gateThresholdDb);
   }
 
   void _sendParam(VoidCallback send) {
@@ -134,6 +137,7 @@ class _HomeScreenState extends State<HomeScreen> {
         await _engine.setEchoFeedback(_echoFeedback);
         await _engine.setReverbMix(_reverbMix);
         await _engine.setMasterVolume(_masterVolume);
+        await _engine.setGateThreshold(_gateThresholdDb);
 
         final bool ok = await _engine.start();
         if (ok) WakelockPlus.enable();
@@ -235,6 +239,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 onChanged: (v) {
                   setState(() => _masterVolume = v);
                   _sendParam(() => _engine.setMasterVolume(v));
+                },
+                onChangeEnd: (_) => _savePrefs(),
+              ),
+              _SliderTile(
+                label: 'Noise Gate',
+                value: _gateThresholdDb,
+                min: -60.0,
+                max: -10.0,
+                valueLabel: '${_gateThresholdDb.round()} dB',
+                onChanged: (v) {
+                  setState(() => _gateThresholdDb = v);
+                  _sendParam(() => _engine.setGateThreshold(v));
                 },
                 onChangeEnd: (_) => _savePrefs(),
               ),

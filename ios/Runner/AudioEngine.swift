@@ -14,6 +14,8 @@ final class AudioEngine {
     private let echo = EchoEffect()
     private let comp = Compressor()
     private let suppressor = FeedbackSuppressor()
+    private let hpf  = HighPassFilter()
+    private let gate = NoiseGate()
 
     private var gain: Float = 1.0
     private(set) var isRunning = false
@@ -48,6 +50,8 @@ final class AudioEngine {
     func setReverbMix(_ mix: Float) { reverb.wetDryMix = min(max(mix, 0), 1) * 100 }
 
     func setMasterVolume(_ volume: Float) { masterVolume = min(max(volume, 0), 1) }
+
+    func setGateThreshold(_ db: Float) { gate.setThresholdDb(db) }
 
     // MARK: - Lifecycle
 
@@ -86,6 +90,9 @@ final class AudioEngine {
 
             suppressor.prepare(sampleRate: Float(format.sampleRate),
                                channelCount: Int(format.channelCount))
+
+            hpf.prepare(sampleRate: Float(format.sampleRate))
+            gate.prepare(sampleRate: Float(format.sampleRate))
 
             engine.attach(player)
             engine.attach(reverb)
@@ -301,6 +308,8 @@ final class AudioEngine {
         }
 
         interleavedScratch.withUnsafeMutableBufferPointer { ptr in
+            hpf.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
+            gate.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
             comp.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
             echo.process(ptr.baseAddress!, frameCount: frameCount, gain: gain)
             comp.limit(ptr.baseAddress!, count: frameCount * channels)

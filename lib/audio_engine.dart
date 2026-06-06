@@ -66,4 +66,9 @@ class AudioEngine {
   Future<void> setMasterVolume(double volume) async {
     await _channel.invokeMethod<void>('setMasterVolume', {'volume': volume});
   }
+
+  /// Noise gate threshold in dBFS (-80.0 .. 0.0). Default -34 dBFS.
+  Future<void> setGateThreshold(double db) async {
+    await _channel.invokeMethod<void>('setGateThreshold', {'db': db});
+  }
 }
