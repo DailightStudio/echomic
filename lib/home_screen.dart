@@ -177,26 +177,29 @@ class _HomeScreenState extends State<HomeScreen> {
         centerTitle: true,
       ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
+        child: Column(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
               const SizedBox(height: 8),
               Icon(
                 _running ? Icons.mic : Icons.mic_off,
-                size: 96,
+                size: 72,
                 color: _running ? cs.primary : cs.onSurfaceVariant,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 4),
               Text(
                 _status,
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium,
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 8),
               _LevelMeter(level: _rmsLevel),
-              const SizedBox(height: 16),
+              const SizedBox(height: 8),
               _SliderTile(
                 label: 'Gain',
                 value: _gain,
@@ -288,8 +291,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 },
                 dense: true,
               ),
-              const Spacer(),
-              SizedBox(
+              const SizedBox(height: 8),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+              child: SizedBox(
                 height: 64,
                 child: FilledButton.icon(
                   onPressed: _busy ? null : _toggle,
@@ -303,9 +312,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 8),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
