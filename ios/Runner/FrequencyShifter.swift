@@ -60,53 +60,72 @@ final class FrequencyShifter {
     // MARK: - Realtime processing (hot path, no allocations)
 
     /// Shift the frequency of interleaved PCM audio in-place.
+    ///
+    /// Channel-outer / frame-inner layout: all filter state is extracted into
+    /// local scalars before the inner loop and written back once per channel,
+    /// reducing class-property array accesses from O(frameCount*channels) to
+    /// O(channels) and eliminating per-sample ARC overhead.
     func process(_ ptr: UnsafeMutablePointer<Float>, frameCount: Int, channels: Int) {
         guard enabled, frameCount > 0 else { return }
 
         let chCount = min(channels, 2)
         let (a0c, a1c) = FrequencyShifter.kA
         let (b0c, b1c) = FrequencyShifter.kB
-
-        var cp = cosP, sp = sinP
         let cd = cosDelta, sd = sinDelta
+        let startCp = cosP, startSp = sinP
+        var finalCp = cosP, finalSp = sinP
 
-        for frame in 0..<frameCount {
-            for ch in 0..<chCount {
+        for ch in 0..<chCount {
+            // Pull state into locals — zero array subscripts inside the hot loop.
+            var lxA0 = xA0[ch], lyA0 = yA0[ch]
+            var lxA1 = xA1[ch], lyA1 = yA1[ch]
+            var lxB0 = xB0[ch], lyB0 = yB0[ch]
+            var lxB1 = xB1[ch], lyB1 = yB1[ch]
+            // All channels get the same phasor value at each frame position.
+            var cp = startCp, sp = startSp
+
+            for frame in 0..<frameCount {
                 let idx = frame * channels + ch
                 let x = ptr[idx]
 
                 // Path A – two cascaded first-order all-pass sections
                 // y(n) = -a·x(n) + x(n-1) + a·y(n-1)
-                let outA0 = -a0c * x    + xA0[ch] + a0c * yA0[ch]
-                let outA1 = -a1c * outA0 + xA1[ch] + a1c * yA1[ch]
-                xA0[ch] = x;     yA0[ch] = outA0
-                xA1[ch] = outA0; yA1[ch] = outA1
+                let outA0 = -a0c * x     + lxA0 + a0c * lyA0
+                let outA1 = -a1c * outA0 + lxA1 + a1c * lyA1
+                lxA0 = x;     lyA0 = outA0
+                lxA1 = outA0; lyA1 = outA1
 
-                // Path B – same structure, different coefficients (~90° from A)
-                let outB0 = -b0c * x    + xB0[ch] + b0c * yB0[ch]
-                let outB1 = -b1c * outB0 + xB1[ch] + b1c * yB1[ch]
-                xB0[ch] = x;     yB0[ch] = outB0
-                xB1[ch] = outB0; yB1[ch] = outB1
+                // Path B (~90° from A)
+                let outB0 = -b0c * x     + lxB0 + b0c * lyB0
+                let outB1 = -b1c * outB0 + lxB1 + b1c * lyB1
+                lxB0 = x;     lyB0 = outB0
+                lxB1 = outB0; lyB1 = outB1
 
                 // Quadrature mix: upper sideband only
                 ptr[idx] = outA1 * cp - outB1 * sp
+
+                // Advance phasor (complex multiply — no trig per sample)
+                let nc = cp * cd - sp * sd
+                let ns = sp * cd + cp * sd
+                cp = nc; sp = ns
             }
 
-            // Advance phasor by complex multiplication (no trig per sample)
-            let newCp = cp * cd - sp * sd
-            let newSp = sp * cd + cp * sd
-            cp = newCp
-            sp = newSp
+            // Write state back (once per channel, not per sample)
+            xA0[ch] = lxA0; yA0[ch] = lyA0
+            xA1[ch] = lxA1; yA1[ch] = lyA1
+            xB0[ch] = lxB0; yB0[ch] = lyB0
+            xB1[ch] = lxB1; yB1[ch] = lyB1
+            finalCp = cp; finalSp = sp
         }
 
-        // Renormalize phasor every 4096 frames to prevent drift
+        // Renormalize phasor every 4096 frames to prevent floating-point drift.
         framesSinceNorm += frameCount
         if framesSinceNorm >= 4096 {
-            let mag = (cp * cp + sp * sp).squareRoot()
-            if mag > 0 { cp /= mag; sp /= mag }
+            let mag = (finalCp * finalCp + finalSp * finalSp).squareRoot()
+            if mag > 0 { finalCp /= mag; finalSp /= mag }
             framesSinceNorm = 0
         }
 
-        cosP = cp; sinP = sp
+        cosP = finalCp; sinP = finalSp
     }
 }
