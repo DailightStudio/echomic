@@ -357,9 +357,9 @@ final class FeedbackSuppressor {
         let sinw0 = sin(w0)
         let alpha = sinw0 / (2.0 * FeedbackSuppressor.kNotchQ)
 
-        let b0 = 1.0
+        let b0: Float = 1.0
         let b1 = -2.0 * cosw0
-        let b2 = 1.0
+        let b2: Float = 1.0
         let a0 = 1.0 + alpha
         let a1 = -2.0 * cosw0
         let a2 = 1.0 - alpha
