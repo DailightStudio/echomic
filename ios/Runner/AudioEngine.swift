@@ -200,17 +200,31 @@ final class AudioEngine {
         applyOutputOverride()
     }
 
-    /// Route to the built-in speaker when no Bluetooth output is active,
-    /// so the phone doesn't default to the tiny earpiece.
+    /// Route audio to BT speaker when available, built-in speaker otherwise.
+    ///
+    /// iOS .playAndRecord defaults to earpiece unless overridden.  When a BT
+    /// device is present we pin the input to the built-in mic explicitly —
+    /// that signals to iOS that we want phone-mic input + BT A2DP/HFP output
+    /// (rather than using the BT device for both directions via HFP).
     private func applyOutputOverride() {
         let session = AVAudioSession.sharedInstance()
         let btTypes: Set<AVAudioSession.Port> = [
             .bluetoothA2DP, .bluetoothHFP, .bluetoothLE
         ]
-        let hasBluetooth = session.currentRoute.outputs.contains {
-            btTypes.contains($0.portType)
+
+        let hasBTOutput = session.currentRoute.outputs.contains { btTypes.contains($0.portType) }
+        let hasBTAvail  = session.availableInputs?.contains { btTypes.contains($0.portType) } ?? false
+
+        if hasBTOutput || hasBTAvail {
+            // Pin input to built-in mic so iOS routes output to BT speaker.
+            if let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                try? session.setPreferredInput(mic)
+            }
+            try? session.overrideOutputAudioPort(.none)
+        } else {
+            // No BT — force main speaker (avoid earpiece).
+            try? session.overrideOutputAudioPort(.speaker)
         }
-        try? session.overrideOutputAudioPort(hasBluetooth ? .none : .speaker)
     }
 
     // MARK: - Session recovery
