@@ -24,11 +24,11 @@ final class FeedbackSuppressor {
     // MARK: - Tunables
 
     private static let kFFTSize: Int          = 1024   // power of two for vDSP
-    private static let kAnalysisInterval: Int = 512    // ~10 ms @ 48 kHz
-    private static let kMaxNotches: Int       = 8      // simultaneous notches
-    private static let kNotchQ: Float         = 32.0   // 30~35 -> very narrow
-    private static let kPeakThreshMult: Float = 10.0   // mean * 10 = candidate
-    private static let kHoldCycles: Int       = 60     // ~600 ms before release
+    private static let kAnalysisInterval: Int = 256    // ~5 ms @ 48 kHz
+    private static let kMaxNotches: Int       = 12     // simultaneous notches
+    private static let kNotchQ: Float         = 28.0   // slightly wider -> surer kill
+    private static let kPeakThreshMult: Float = 5.0    // mean * 5 = candidate
+    private static let kHoldCycles: Int       = 100    // ~1 s before release
     private static let kMaxChannels: Int      = 2
 
     private static let kMinNotchHz: Float     = 100.0

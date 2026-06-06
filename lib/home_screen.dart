@@ -28,6 +28,7 @@ class _HomeScreenState extends State<HomeScreen> {
   double _reverbMix = 0.0;
   double _masterVolume = 1.0;
   double _gateThresholdDb = -34.0;
+  final List<double> _eqGains = [0.0, 0.0, 0.0, 0.0, 0.0]; // dB per band
   double _rmsLevel = 0.0; // 0.0~1.0 선형
   StreamSubscription? _eventSub;
 
@@ -81,6 +82,9 @@ class _HomeScreenState extends State<HomeScreen> {
       _reverbMix = p.getDouble('reverbMix') ?? 0.0;
       _masterVolume = p.getDouble('masterVolume') ?? 1.0;
       _gateThresholdDb = p.getDouble('gateThresholdDb') ?? -34.0;
+      for (int i = 0; i < 5; i++) {
+        _eqGains[i] = p.getDouble('eq$i') ?? 0.0;
+      }
     });
   }
 
@@ -92,6 +96,9 @@ class _HomeScreenState extends State<HomeScreen> {
     await p.setDouble('reverbMix', _reverbMix);
     await p.setDouble('masterVolume', _masterVolume);
     await p.setDouble('gateThresholdDb', _gateThresholdDb);
+    for (int i = 0; i < 5; i++) {
+      await p.setDouble('eq$i', _eqGains[i]);
+    }
   }
 
   void _sendParam(VoidCallback send) {
@@ -138,6 +145,9 @@ class _HomeScreenState extends State<HomeScreen> {
         await _engine.setReverbMix(_reverbMix);
         await _engine.setMasterVolume(_masterVolume);
         await _engine.setGateThreshold(_gateThresholdDb);
+        for (int i = 0; i < 5; i++) {
+          await _engine.setEQBand(i, _eqGains[i]);
+        }
 
         final bool ok = await _engine.start();
         if (ok) WakelockPlus.enable();
@@ -254,6 +264,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 },
                 onChangeEnd: (_) => _savePrefs(),
               ),
+              _EQStrip(
+                gains: _eqGains,
+                onChanged: (band, v) {
+                  setState(() => _eqGains[band] = v);
+                  _sendParam(() => _engine.setEQBand(band, v));
+                },
+                onChangeEnd: (_) => _savePrefs(),
+              ),
               const Spacer(),
               SizedBox(
                 height: 64,
@@ -364,6 +382,65 @@ class _LevelMeter extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _EQStrip extends StatelessWidget {
+  const _EQStrip({
+    required this.gains,
+    required this.onChanged,
+    required this.onChangeEnd,
+  });
+
+  final List<double> gains;
+  final void Function(int band, double value) onChanged;
+  final void Function(double) onChangeEnd;
+
+  static const _labels = ['100Hz', '400Hz', '1kHz', '3kHz', '8kHz'];
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('EQ', style: Theme.of(context).textTheme.titleSmall),
+            Text(
+              gains.map((g) => (g >= 0 ? '+' : '') + g.toStringAsFixed(0)).join('  '),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Row(
+          children: List.generate(5, (i) {
+            return Expanded(
+              child: Column(
+                children: [
+                  RotatedBox(
+                    quarterTurns: 3,
+                    child: Slider(
+                      value: gains[i],
+                      min: -12,
+                      max: 12,
+                      onChanged: (v) => onChanged(i, v),
+                      onChangeEnd: onChangeEnd,
+                    ),
+                  ),
+                  Text(
+                    _labels[i],
+                    style: Theme.of(context).textTheme.labelSmall,
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            );
+          }),
+        ),
+      ],
     );
   }
 }

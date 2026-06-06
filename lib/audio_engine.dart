@@ -71,4 +71,9 @@ class AudioEngine {
   Future<void> setGateThreshold(double db) async {
     await _channel.invokeMethod<void>('setGateThreshold', {'db': db});
   }
+
+  /// Set EQ band gain. band: 0-4 (100Hz/400Hz/1kHz/3kHz/8kHz), gainDb: -12..12.
+  Future<void> setEQBand(int band, double gainDb) async {
+    await _channel.invokeMethod<void>('setEQBand', {'band': band, 'gainDb': gainDb});
+  }
 }

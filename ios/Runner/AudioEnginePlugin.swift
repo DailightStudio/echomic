@@ -65,6 +65,12 @@ final class AudioEnginePlugin: NSObject {
                 engine.setGateThreshold(Float(db))
             }
             result(nil)
+        case "setEQBand":
+            if let band = (call.arguments as? [String: Any])?["band"] as? Int,
+               let gainDb = doubleArg(call, "gainDb") {
+                engine.setEQBand(band, gainDb: Float(gainDb))
+            }
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }

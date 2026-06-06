@@ -11,6 +11,7 @@ final class AudioEngine {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let reverb = AVAudioUnitReverb()
+    private let eq = AVAudioUnitEQ(numberOfBands: 5)
     private let echo = EchoEffect()
     private let comp = Compressor()
     private let suppressor = FeedbackSuppressor()
@@ -52,6 +53,11 @@ final class AudioEngine {
     func setMasterVolume(_ volume: Float) { masterVolume = min(max(volume, 0), 1) }
 
     func setGateThreshold(_ db: Float) { gate.setThresholdDb(db) }
+
+    func setEQBand(_ band: Int, gainDb: Float) {
+        guard band >= 0, band < eq.bands.count else { return }
+        eq.bands[band].gain = min(max(gainDb, -12), 12)
+    }
 
     // MARK: - Lifecycle
 
@@ -95,10 +101,29 @@ final class AudioEngine {
             gate.prepare(sampleRate: Float(format.sampleRate))
 
             engine.attach(player)
+            engine.attach(eq)
+
+            // Configure 5 EQ bands
+            let eqConfig: [(Float, AVAudioUnitEQFilterType, Float)] = [
+                (100,  .lowShelf,  1.0),
+                (400,  .parametric, 1.5),
+                (1000, .parametric, 1.5),
+                (3000, .parametric, 1.5),
+                (8000, .highShelf,  1.0),
+            ]
+            for (i, (freq, type, bw)) in eqConfig.enumerated() {
+                eq.bands[i].frequency  = freq
+                eq.bands[i].filterType = type
+                eq.bands[i].bandwidth  = bw
+                eq.bands[i].gain       = 0
+                eq.bands[i].bypass     = false
+            }
+
             engine.attach(reverb)
             reverb.loadFactoryPreset(.largeHall)
             reverb.wetDryMix = 0  // off by default
-            engine.connect(player, to: reverb, format: format)
+            engine.connect(player, to: eq, format: format)
+            engine.connect(eq, to: reverb, format: format)
             engine.connect(reverb, to: engine.mainMixerNode, format: format)
 
             // Pre-allocate the realtime output buffer pool + scratch so the audio
@@ -145,6 +170,8 @@ final class AudioEngine {
         if player.isPlaying { player.stop() }
         if engine.isRunning { engine.stop() }
         engine.disconnectNodeOutput(reverb)
+        engine.disconnectNodeOutput(eq)
+        engine.detach(eq)
         engine.detach(reverb)
         engine.disconnectNodeOutput(player)
         engine.detach(player)
