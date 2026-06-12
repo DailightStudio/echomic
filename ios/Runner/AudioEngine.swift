@@ -61,6 +61,18 @@ final class AudioEngine: NSObject {
 
     private(set) var currentRMSLevel: Float = 0.0
 
+    // MARK: - Init
+
+    override init() {
+        super.init()
+        // Attach nodes exactly once for the engine's lifetime. stop() never
+        // detaches them, so a stop() reached via a partial start() failure can
+        // never hit the "detach of unattached node" NSException.
+        engine.attach(player)
+        engine.attach(eq)
+        engine.attach(reverb)
+    }
+
     // MARK: - Parameters
 
     func setGain(_ value: Float) { gain = value }
@@ -122,8 +134,7 @@ final class AudioEngine: NSObject {
             hpf.prepare(sampleRate: Float(format.sampleRate))
             gate.prepare(sampleRate: Float(format.sampleRate))
 
-            engine.attach(player)
-            engine.attach(eq)
+            // player/eq/reverb are attached once in init().
 
             // Configure 5 EQ bands
             let eqConfig: [(Float, AVAudioUnitEQFilterType, Float)] = [
@@ -141,7 +152,6 @@ final class AudioEngine: NSObject {
                 eq.bands[i].bypass     = false
             }
 
-            engine.attach(reverb)
             reverb.loadFactoryPreset(.largeHall)
             reverb.wetDryMix = lastReverbMix * 100  // restore cached mix
             engine.connect(player, to: eq, format: format)
@@ -191,12 +201,13 @@ final class AudioEngine: NSObject {
         audioConverter = nil
         if player.isPlaying { player.stop() }
         if engine.isRunning { engine.stop() }
+        // Nodes stay attached for the engine's lifetime (attached in init());
+        // only drop the connections so start() can reconnect with a new format.
+        // Detaching here would NSException-crash when stop() runs on a partial
+        // start() failure path.
         engine.disconnectNodeOutput(reverb)
         engine.disconnectNodeOutput(eq)
-        engine.detach(eq)
-        engine.detach(reverb)
         engine.disconnectNodeOutput(player)
-        engine.detach(player)
         try? AVAudioSession.sharedInstance().setActive(
             false, options: [.notifyOthersOnDeactivation])
         isRunning = false
