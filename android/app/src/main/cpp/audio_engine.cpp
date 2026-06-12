@@ -71,6 +71,17 @@ bool AudioEngine::openStreams() {
         return false;
     }
 
+    // The negotiated input format may differ from what we requested (e.g. on
+    // BT routes). A rate/channel mismatch would feed mis-clocked samples into
+    // the filters, so treat it as a hard failure.
+    if (inputStream_->getSampleRate() != sampleRate_ ||
+        inputStream_->getChannelCount() != channelCount_) {
+        LOGE("Input/output format mismatch: in rate=%d ch=%d, out rate=%d ch=%d",
+             inputStream_->getSampleRate(), inputStream_->getChannelCount(),
+             sampleRate_, channelCount_);
+        return false;
+    }
+
     // Prepare the echo delay line for the negotiated format.
     echo_.prepare(sampleRate_, channelCount_);
     echo_.reset();
@@ -153,9 +164,11 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream *stream,
         }
 
         // RMS 계산 (UI 폴링용)
-        float sumSq = 0.0f;
-        for (int i = 0; i < sampleCount; ++i) sumSq += in[i] * in[i];
-        rmsLevel_.store(std::sqrt(sumSq / static_cast<float>(sampleCount)));
+        if (sampleCount > 0) {
+            float sumSq = 0.0f;
+            for (int i = 0; i < sampleCount; ++i) sumSq += in[i] * in[i];
+            rmsLevel_.store(std::sqrt(sumSq / static_cast<float>(sampleCount)));
+        }
 
         int writeIdx = fifoWrite_.load(std::memory_order_relaxed);
         const int readIdx = fifoRead_.load(std::memory_order_acquire);
@@ -185,11 +198,21 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream *stream,
     return oboe::DataCallbackResult::Continue;
 }
 
-void AudioEngine::onErrorAfterClose(oboe::AudioStream * /*stream*/,
+void AudioEngine::onErrorAfterClose(oboe::AudioStream *stream,
                                     oboe::Result error) {
     LOGE("Stream error after close: %s", oboe::convertToText(error));
     std::lock_guard<std::mutex> lock(lifecycleLock_);
     running_.store(false);
+    // The errored stream is already closed by Oboe; stop and close the partner
+    // stream too so it does not keep running against a dead counterpart.
+    if (inputStream_ && inputStream_.get() != stream) {
+        inputStream_->requestStop();
+        inputStream_->close();
+    }
+    if (outputStream_ && outputStream_.get() != stream) {
+        outputStream_->requestStop();
+        outputStream_->close();
+    }
     inputStream_.reset();
     outputStream_.reset();
 }
