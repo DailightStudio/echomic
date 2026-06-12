@@ -89,6 +89,7 @@ final class FeedbackSuppressor {
     private struct Notch {
         var active: Bool = false
         var bin: Int = 0
+        var freq: Float = 0            // tracked (smoothed) center frequency, Hz
         var cyclesSinceRefresh: Int = 0
 
         // Biquad coefficients (normalized so a0 == 1).
@@ -443,10 +444,10 @@ final class FeedbackSuppressor {
     /// free slot. Recomputes biquad coefficients only when a slot is (re)bound
     /// to a new frequency.
     private func armNotch(forBin bin: Int) {
-        // Already covered? Refresh its hold counter and bail.
+        // Already covered? Refresh (and re-center) the existing notch.
         for i in 0..<FeedbackSuppressor.kMaxNotches where notches[i].active {
             if abs(notches[i].bin - bin) <= FeedbackSuppressor.kBinDedupRadius {
-                notches[i].cyclesSinceRefresh = 0
+                refreshNotch(slot: i, bin: bin)
                 return
             }
         }
@@ -459,12 +460,12 @@ final class FeedbackSuppressor {
         }
         guard slot >= 0 else { return }  // bank full -> ignore until one frees up
 
-        let binHz = sampleRate / Float(FeedbackSuppressor.kFFTSize)
-        let freq = Float(bin) * binHz
+        let freq = interpolateFrequency(bin: bin)
         setNotchCoefficients(slot: slot, freq: freq)
 
         notches[slot].active = true
         notches[slot].bin = bin
+        notches[slot].freq = freq
         notches[slot].cyclesSinceRefresh = 0
 
         // Zero this notch's filter state so it starts cleanly.
@@ -472,6 +473,41 @@ final class FeedbackSuppressor {
             let s = slot * FeedbackSuppressor.kMaxChannels + ch
             x1[s] = 0; x2[s] = 0; y1[s] = 0; y2[s] = 0
         }
+    }
+
+    /// Re-detected peak on an active notch: re-estimate the precise frequency
+    /// and ease the notch toward it (howls drift as the room/mic geometry
+    /// changes), keeping the filter state intact to avoid transients.
+    private func refreshNotch(slot: Int, bin: Int) {
+        let newFreq = interpolateFrequency(bin: bin)
+        let smoothed = 0.7 * notches[slot].freq + 0.3 * newFreq
+        setNotchCoefficients(slot: slot, freq: smoothed)
+        notches[slot].freq = smoothed
+        notches[slot].bin = bin
+        notches[slot].cyclesSinceRefresh = 0
+    }
+
+    /// Sub-bin peak frequency estimate: fit a parabola through the
+    /// log-magnitudes at bin-1/bin/bin+1 and return its vertex. Cuts the worst
+    /// case center error from binHz/2 (~23 Hz @ 48 kHz) to a few Hz, which
+    /// matters for the narrow notch to actually sit on the howl.
+    private func interpolateFrequency(bin: Int) -> Float {
+        let binHz = sampleRate / Float(FeedbackSuppressor.kFFTSize)
+        let half = FeedbackSuppressor.kFFTSize / 2
+        guard bin > 0, bin < half - 1 else { return Float(bin) * binHz }
+
+        let m0 = magnitudes[bin - 1]
+        let m1 = magnitudes[bin]
+        let m2 = magnitudes[bin + 1]
+        guard m0 > 0, m1 > 0, m2 > 0 else { return Float(bin) * binHz }
+
+        let lm0 = log(m0), lm1 = log(m1), lm2 = log(m2)
+        let denom = lm0 - 2.0 * lm1 + lm2
+        guard abs(denom) > 1e-12 else { return Float(bin) * binHz }
+
+        var fracBin = (lm0 - lm2) / (2.0 * denom)
+        fracBin = min(max(fracBin, -0.5), 0.5)
+        return (Float(bin) + fracBin) * binHz
     }
 
     /// Age all active notches; release any that have not been refreshed within

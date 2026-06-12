@@ -126,6 +126,7 @@ private:
     struct Notch {
         bool  active{false};
         int   bin{0};
+        float freq{0};            // tracked (smoothed) center frequency, Hz
         int   cyclesSinceRefresh{0};
         float b0{1}, b1{0}, b2{0}, a1{0}, a2{0};
     };
@@ -316,10 +317,10 @@ private:
     }
 
     void armNotch(int bin) {
-        // Refresh if an existing notch already covers this bin.
+        // Refresh (and re-center) if an existing notch already covers this bin.
         for (int i = 0; i < kMaxNotches; i++) {
             if (notches_[i].active && std::abs(notches_[i].bin - bin) <= kBinDedupRadius) {
-                notches_[i].cyclesSinceRefresh = 0;
+                refreshNotch(i, bin);
                 return;
             }
         }
@@ -330,15 +331,50 @@ private:
         }
         if (slot < 0) return;
 
-        float freq = bin * (sampleRate_ / kFFTSize);
+        float freq = interpolateFrequency(bin);
         setNotchCoeffs(slot, freq);
         notches_[slot].active = true;
         notches_[slot].bin = bin;
+        notches_[slot].freq = freq;
         notches_[slot].cyclesSinceRefresh = 0;
         for (int ch = 0; ch < kMaxChannels; ch++) {
             int s = slot * kMaxChannels + ch;
             x1_[s] = x2_[s] = y1_[s] = y2_[s] = 0;
         }
+    }
+
+    // Re-detected peak on an active notch: re-estimate the precise frequency
+    // and ease the notch toward it (howls drift as the room/mic geometry
+    // changes), keeping the filter state intact to avoid transients.
+    void refreshNotch(int slot, int bin) {
+        float newFreq = interpolateFrequency(bin);
+        float smoothed = 0.7f * notches_[slot].freq + 0.3f * newFreq;
+        setNotchCoeffs(slot, smoothed);
+        notches_[slot].freq = smoothed;
+        notches_[slot].bin = bin;
+        notches_[slot].cyclesSinceRefresh = 0;
+    }
+
+    // Sub-bin peak frequency estimate: fit a parabola through the
+    // log-magnitudes at bin-1/bin/bin+1 and return its vertex. Cuts the worst
+    // case center error from binHz/2 (~23 Hz @ 48 kHz) to a few Hz, which
+    // matters for the narrow notch to actually sit on the howl.
+    float interpolateFrequency(int bin) {
+        const float binHz = sampleRate_ / kFFTSize;
+        if (bin <= 0 || bin >= kFFTSize / 2 - 1) return bin * binHz;
+
+        float m0 = magnitudes_[bin - 1];
+        float m1 = magnitudes_[bin];
+        float m2 = magnitudes_[bin + 1];
+        if (m0 <= 0 || m1 <= 0 || m2 <= 0) return bin * binHz;
+
+        float lm0 = logf(m0), lm1 = logf(m1), lm2 = logf(m2);
+        float denom = lm0 - 2.0f * lm1 + lm2;
+        if (std::fabs(denom) < 1e-12f) return bin * binHz;
+
+        float fracBin = (lm0 - lm2) / (2.0f * denom);
+        fracBin = std::max(-0.5f, std::min(0.5f, fracBin));
+        return (bin + fracBin) * binHz;
     }
 
     void ageNotches() {
