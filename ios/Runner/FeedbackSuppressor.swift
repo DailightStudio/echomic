@@ -48,6 +48,11 @@ final class FeedbackSuppressor {
     // every re-detection (1: -7 dB, 2: -14 dB, 3: full band-reject).
     private static let kStage1GainDb: Float     = -7.0
     private static let kStage2GainDb: Float     = -14.0
+    // Minimum analysis cycles a notch must dwell at a stage before it may
+    // deepen again (~32 ms @ 48 kHz). Without it, consecutive re-detections
+    // every analysis cycle escalate stage 1->3 in ~11 ms, defeating the
+    // staged entry's false-positive damage limiting.
+    private static let kStepUpCooldownCycles: Int = 6
 
     private static let kMinNotchHz: Float     = 100.0
     // Upper bound is sampleRate * 0.45 (computed in prepare()).
@@ -101,6 +106,7 @@ final class FeedbackSuppressor {
         var freq: Float = 0            // tracked (smoothed) center frequency, Hz
         var cyclesSinceRefresh: Int = 0
         var depthStage: Int = 0        // 0=off, 1=-7dB, 2=-14dB, 3=full notch
+        var cyclesSinceStepUp: Int = 0 // dwell timer for the step-up cooldown
 
         // Biquad coefficients (normalized so a0 == 1).
         var b0: Float = 1, b1: Float = 0, b2: Float = 0
@@ -196,6 +202,7 @@ final class FeedbackSuppressor {
         for i in notches.indices {
             notches[i].active = false
             notches[i].cyclesSinceRefresh = 0
+            notches[i].cyclesSinceStepUp = 0
         }
         for i in candidates.indices { candidates[i] = Candidate() }
         for i in x1.indices { x1[i] = 0; x2[i] = 0; y1[i] = 0; y2[i] = 0 }
@@ -479,6 +486,7 @@ final class FeedbackSuppressor {
         notches[slot].bin = bin
         notches[slot].freq = freq
         notches[slot].cyclesSinceRefresh = 0
+        notches[slot].cyclesSinceStepUp = 0
 
         // Zero this notch's filter state so it starts cleanly.
         for ch in 0..<FeedbackSuppressor.kMaxChannels {
@@ -493,13 +501,23 @@ final class FeedbackSuppressor {
     private func refreshNotch(slot: Int, bin: Int) {
         let newFreq = interpolateFrequency(bin: bin)
         let smoothed = 0.7 * notches[slot].freq + 0.3 * newFreq
+        notches[slot].freq = smoothed
+        notches[slot].bin = bin
+        notches[slot].cyclesSinceRefresh = 0
+
+        // Step-up cooldown: the notch must dwell kStepUpCooldownCycles at its
+        // current stage before it may deepen again. During the cooldown the
+        // refresh only re-centers the notch (frequency drift tracking).
+        if notches[slot].cyclesSinceStepUp < FeedbackSuppressor.kStepUpCooldownCycles {
+            setNotchCoefficients(slot: slot, freq: smoothed,
+                                 depthStage: notches[slot].depthStage)
+            return
+        }
         // Re-detection while already notched -> the cut is not deep enough
         // yet; step the depth up one stage (capped at full notch).
         let stage = min(notches[slot].depthStage + 1, 3)
         setNotchCoefficients(slot: slot, freq: smoothed, depthStage: stage)
-        notches[slot].freq = smoothed
-        notches[slot].bin = bin
-        notches[slot].cyclesSinceRefresh = 0
+        notches[slot].cyclesSinceStepUp = 0
     }
 
     /// Sub-bin peak frequency estimate: fit a parabola through the
@@ -533,6 +551,7 @@ final class FeedbackSuppressor {
     private func ageNotches() {
         for i in 0..<FeedbackSuppressor.kMaxNotches where notches[i].active {
             notches[i].cyclesSinceRefresh += 1
+            notches[i].cyclesSinceStepUp += 1
             guard notches[i].cyclesSinceRefresh >= holdCycles else { continue }
             if notches[i].depthStage > 0 {
                 notches[i].depthStage -= 1

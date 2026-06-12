@@ -46,6 +46,11 @@ public:
     // every re-detection (1: -7 dB, 2: -14 dB, 3: full band-reject).
     static constexpr float kStage1GainDb     = -7.0f;
     static constexpr float kStage2GainDb     = -14.0f;
+    // Minimum analysis cycles a notch must dwell at a stage before it may
+    // deepen again (~32 ms @ 48 kHz). Without it, consecutive re-detections
+    // every analysis cycle escalate stage 1->3 in ~11 ms, defeating the
+    // staged entry's false-positive damage limiting.
+    static constexpr int   kStepUpCooldownCycles = 6;
     static constexpr float kMinNotchHz       = 100.0f;
     static constexpr float kMaxNotchFraction = 0.45f;
     static constexpr int   kBinDedupRadius   = 2;
@@ -80,6 +85,7 @@ public:
         for (int i = 0; i < kMaxNotches; i++) {
             notches_[i].active = false;
             notches_[i].cyclesSinceRefresh = 0;
+            notches_[i].cyclesSinceStepUp = 0;
         }
         memset(candidates_, 0, sizeof(candidates_));
         memset(x1_, 0, sizeof(x1_));
@@ -139,6 +145,7 @@ private:
         float freq{0};            // tracked (smoothed) center frequency, Hz
         int   cyclesSinceRefresh{0};
         int   depthStage{0};      // 0=off, 1=-7dB, 2=-14dB, 3=full notch
+        int   cyclesSinceStepUp{0};  // dwell timer for the step-up cooldown
         float b0{1}, b1{0}, b2{0}, a1{0}, a2{0};
     };
 
@@ -350,6 +357,7 @@ private:
         notches_[slot].bin = bin;
         notches_[slot].freq = freq;
         notches_[slot].cyclesSinceRefresh = 0;
+        notches_[slot].cyclesSinceStepUp = 0;
         for (int ch = 0; ch < kMaxChannels; ch++) {
             int s = slot * kMaxChannels + ch;
             x1_[s] = x2_[s] = y1_[s] = y2_[s] = 0;
@@ -362,13 +370,22 @@ private:
     void refreshNotch(int slot, int bin) {
         float newFreq = interpolateFrequency(bin);
         float smoothed = 0.7f * notches_[slot].freq + 0.3f * newFreq;
+        notches_[slot].freq = smoothed;
+        notches_[slot].bin = bin;
+        notches_[slot].cyclesSinceRefresh = 0;
+
+        // Step-up cooldown: the notch must dwell kStepUpCooldownCycles at its
+        // current stage before it may deepen again. During the cooldown the
+        // refresh only re-centers the notch (frequency drift tracking).
+        if (notches_[slot].cyclesSinceStepUp < kStepUpCooldownCycles) {
+            setNotchCoeffs(slot, smoothed, notches_[slot].depthStage);
+            return;
+        }
         // Re-detection while already notched -> the cut is not deep enough
         // yet; step the depth up one stage (capped at full notch).
         int stage = std::min(notches_[slot].depthStage + 1, 3);
         setNotchCoeffs(slot, smoothed, stage);
-        notches_[slot].freq = smoothed;
-        notches_[slot].bin = bin;
-        notches_[slot].cyclesSinceRefresh = 0;
+        notches_[slot].cyclesSinceStepUp = 0;
     }
 
     // Sub-bin peak frequency estimate: fit a parabola through the
@@ -401,6 +418,7 @@ private:
         for (int i = 0; i < kMaxNotches; i++) {
             if (!notches_[i].active) continue;
             notches_[i].cyclesSinceRefresh++;
+            notches_[i].cyclesSinceStepUp++;
             if (notches_[i].cyclesSinceRefresh < holdCycles_) continue;
             if (notches_[i].depthStage > 0) {
                 notches_[i].depthStage--;
