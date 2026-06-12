@@ -42,6 +42,12 @@ final class AudioEngine: NSObject {
     // (the free-list search in handle() + the scheduleBuffer completion).
     private var bufferFree: [Bool] = []
     private var interleavedScratch: [Float] = []
+    // Generation counter guarding the buffer pool across stop()/start() cycles.
+    // Only ever read/written on captureQueue (handle(), scheduleBuffer
+    // completions, and the sync block in stop()), so no extra locking needed.
+    // Stale completions from a previous run see a mismatched generation and
+    // must not touch the (re-allocated) bufferFree array.
+    private var generation: Int = 0
 
     // Cached echo params so they survive a prepare()/restart.
     private var lastDelayMs: Float = 150.0
@@ -176,7 +182,11 @@ final class AudioEngine: NSObject {
         removeSessionObservers()
 
         captureSession?.stopRunning()
-        captureQueue.sync {}   // wait for any in-flight captureOutput callback
+        // Wait for any in-flight captureOutput callback AND invalidate the
+        // current generation: scheduleBuffer completions that land on
+        // captureQueue after this point (e.g. fired by player.stop() below)
+        // see a stale generation and leave bufferFree alone.
+        captureQueue.sync { generation += 1 }
         captureSession = nil
         audioConverter = nil
         if player.isPlaying { player.stop() }
@@ -205,6 +215,13 @@ final class AudioEngine: NSObject {
     }
 
     private func setupCaptureSession(processingFormat: AVAudioFormat) throws {
+        // Fail fast (and cleanly) if mic permission was denied/revoked instead
+        // of letting startRunning() spin up a session that never delivers audio.
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            throw NSError(domain: "echomic", code: -4,
+                          userInfo: [NSLocalizedDescriptionKey: "Microphone access denied"])
+        }
+
         let cs = AVCaptureSession()
         cs.automaticallyConfiguresApplicationAudioSession = false
 
@@ -337,6 +354,19 @@ final class AudioEngine: NSObject {
     private func resumeEngine() {
         try? configureSession()
         try? engine.start()
+        guard engine.isRunning else {
+            // Engine failed to restart -- calling player.play() now would raise
+            // an NSException and crash. Fall back to a full reconfigure instead.
+            NSLog("echomic: resumeEngine failed to restart engine, reconfiguring")
+            guard !isReconfiguring else { return }
+            isReconfiguring = true
+            DispatchQueue.main.async {
+                self.stop()
+                _ = self.start()
+                self.isReconfiguring = false
+            }
+            return
+        }
         player.play()
         if captureSession?.isRunning == false {
             captureSession?.startRunning()
@@ -438,8 +468,12 @@ final class AudioEngine: NSObject {
         }
 
         let idx = freeIdx
+        let gen = generation  // handle() runs on captureQueue
         player.scheduleBuffer(outBuffer) { [weak self] in
-            self?.captureQueue.async { self?.bufferFree[idx] = true }
+            self?.captureQueue.async {
+                guard let self = self, self.generation == gen else { return }
+                self.bufferFree[idx] = true
+            }
         }
     }
 }
