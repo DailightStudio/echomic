@@ -53,7 +53,6 @@ final class AudioEngine: NSObject {
 
     // Realtime buffer pool: avoid heap allocation on the audio callback.
     private var outputBufferPool: [AVAudioPCMBuffer] = []
-    private var poolIndex = 0
     // Free-list for the output pool. Only ever touched on captureQueue
     // (the free-list search in handle() + the scheduleBuffer completion).
     private var bufferFree: [Bool] = []
@@ -183,7 +182,6 @@ final class AudioEngine: NSObject {
             }
             bufferFree = [Bool](repeating: true, count: poolSize)
             interleavedScratch = [Float](repeating: 0, count: maxFrames * Int(format.channelCount))
-            poolIndex = 0
 
             engine.prepare()
             try engine.start()
