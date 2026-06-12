@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 // FFT-based dynamic notch feedback suppressor.
@@ -392,12 +393,22 @@ private:
         return (bin + fracBin) * binHz;
     }
 
+    // Hold expiry releases the notch gradually: instead of jumping from a
+    // full notch straight to 0 dB (click + instant re-howl), the depth steps
+    // down one stage (3->2->1->0) per hold period, deactivating only once
+    // stage 0 is reached. A re-detection during the ramp steps it back up.
     void ageNotches() {
         for (int i = 0; i < kMaxNotches; i++) {
             if (!notches_[i].active) continue;
             notches_[i].cyclesSinceRefresh++;
-            if (notches_[i].cyclesSinceRefresh >= holdCycles_)
+            if (notches_[i].cyclesSinceRefresh < holdCycles_) continue;
+            if (notches_[i].depthStage > 0) {
+                notches_[i].depthStage--;
+                setNotchCoeffs(i, notches_[i].freq, notches_[i].depthStage);
+                notches_[i].cyclesSinceRefresh = 0;
+            } else {
                 notches_[i].active = false;
+            }
         }
     }
 

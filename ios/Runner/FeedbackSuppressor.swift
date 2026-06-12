@@ -525,12 +525,21 @@ final class FeedbackSuppressor {
         return (Float(bin) + fracBin) * binHz
     }
 
-    /// Age all active notches; release any that have not been refreshed within
-    /// the hold window.
+    /// Age all active notches. Hold expiry releases a notch gradually:
+    /// instead of jumping from a full notch straight to 0 dB (click + instant
+    /// re-howl), the depth steps down one stage (3->2->1->0) per hold period,
+    /// deactivating only once stage 0 is reached. A re-detection during the
+    /// ramp steps it back up.
     private func ageNotches() {
         for i in 0..<FeedbackSuppressor.kMaxNotches where notches[i].active {
             notches[i].cyclesSinceRefresh += 1
-            if notches[i].cyclesSinceRefresh >= holdCycles {
+            guard notches[i].cyclesSinceRefresh >= holdCycles else { continue }
+            if notches[i].depthStage > 0 {
+                notches[i].depthStage -= 1
+                setNotchCoefficients(slot: i, freq: notches[i].freq,
+                                     depthStage: notches[i].depthStage)
+                notches[i].cyclesSinceRefresh = 0
+            } else {
                 notches[i].active = false
             }
         }
