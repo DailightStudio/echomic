@@ -27,7 +27,6 @@ public:
     static constexpr int   kFFTSize          = 1024;
     static constexpr int   kAnalysisInterval = 256;
     static constexpr int   kMaxNotches       = 12;
-    static constexpr float kNotchQ           = 28.0f;
     static constexpr float kPeakThreshMult   = 5.0f;
     static constexpr float kHoldSeconds      = 0.7f;
     static constexpr int   kMaxChannels      = 2;
@@ -36,6 +35,16 @@ public:
     static constexpr float kGrowthMinRatio   = 1.0f;  // latest >= running average
     static constexpr float kHarmonic2Ratio   = 0.6f;  // PHPR thresholds (power)
     static constexpr float kHarmonic3Ratio   = 0.4f;
+
+    // Constant absolute notch bandwidth (Hz) -> Q varies with frequency, so
+    // low howls get a proportionally wide notch and high howls stay surgical.
+    static constexpr float kNotchBandwidthHz = 50.0f;
+    static constexpr float kMinNotchQ        = 8.0f;
+    static constexpr float kMaxNotchQ        = 60.0f;
+    // Staged depth: a new notch starts as a gentle peaking cut and deepens on
+    // every re-detection (1: -7 dB, 2: -14 dB, 3: full band-reject).
+    static constexpr float kStage1GainDb     = -7.0f;
+    static constexpr float kStage2GainDb     = -14.0f;
     static constexpr float kMinNotchHz       = 100.0f;
     static constexpr float kMaxNotchFraction = 0.45f;
     static constexpr int   kBinDedupRadius   = 2;
@@ -128,6 +137,7 @@ private:
         int   bin{0};
         float freq{0};            // tracked (smoothed) center frequency, Hz
         int   cyclesSinceRefresh{0};
+        int   depthStage{0};      // 0=off, 1=-7dB, 2=-14dB, 3=full notch
         float b0{1}, b1{0}, b2{0}, a1{0}, a2{0};
     };
 
@@ -331,8 +341,10 @@ private:
         }
         if (slot < 0) return;
 
+        // New notch enters softly (stage 1) and only deepens if the howl is
+        // re-detected, limiting damage when the detector is briefly fooled.
         float freq = interpolateFrequency(bin);
-        setNotchCoeffs(slot, freq);
+        setNotchCoeffs(slot, freq, 1);
         notches_[slot].active = true;
         notches_[slot].bin = bin;
         notches_[slot].freq = freq;
@@ -349,7 +361,10 @@ private:
     void refreshNotch(int slot, int bin) {
         float newFreq = interpolateFrequency(bin);
         float smoothed = 0.7f * notches_[slot].freq + 0.3f * newFreq;
-        setNotchCoeffs(slot, smoothed);
+        // Re-detection while already notched -> the cut is not deep enough
+        // yet; step the depth up one stage (capped at full notch).
+        int stage = std::min(notches_[slot].depthStage + 1, 3);
+        setNotchCoeffs(slot, smoothed, stage);
         notches_[slot].freq = smoothed;
         notches_[slot].bin = bin;
         notches_[slot].cyclesSinceRefresh = 0;
@@ -386,17 +401,43 @@ private:
         }
     }
 
-    void setNotchCoeffs(int slot, float freq) {
+    // Stage 3 is the classic RBJ band-reject notch. Stages 1-2 use the RBJ
+    // peaking-cut form instead of scaling the notch's b coefficients (which
+    // would attenuate the whole band, not just the notch center).
+    void setNotchCoeffs(int slot, float freq, int depthStage = 3) {
         float f  = std::max(kMinNotchHz, std::min(freq, sampleRate_ * kMaxNotchFraction));
         float w0 = 2.0f * (float)M_PI * f / sampleRate_;
         float cosw0 = cosf(w0), sinw0 = sinf(w0);
-        float alpha = sinw0 / (2.0f * kNotchQ);
-        float a0inv = 1.0f / (1.0f + alpha);
-        notches_[slot].b0 =  1.0f         * a0inv;
-        notches_[slot].b1 = -2.0f * cosw0 * a0inv;
-        notches_[slot].b2 =  1.0f         * a0inv;
-        notches_[slot].a1 = -2.0f * cosw0 * a0inv;
-        notches_[slot].a2 = (1.0f - alpha) * a0inv;
+
+        // Constant absolute bandwidth -> frequency-proportional Q.
+        float Q = std::max(kMinNotchQ, std::min(f / kNotchBandwidthHz, kMaxNotchQ));
+        float alpha = sinw0 / (2.0f * Q);
+
+        Notch& n = notches_[slot];
+        n.depthStage = std::max(0, std::min(depthStage, 3));
+        if (n.depthStage >= 3) {
+            // Full RBJ band-reject notch.
+            float a0inv = 1.0f / (1.0f + alpha);
+            n.b0 =  1.0f         * a0inv;
+            n.b1 = -2.0f * cosw0 * a0inv;
+            n.b2 =  1.0f         * a0inv;
+            n.a1 = -2.0f * cosw0 * a0inv;
+            n.a2 = (1.0f - alpha) * a0inv;
+        } else if (n.depthStage >= 1) {
+            // RBJ peaking EQ cut at the stage gain.
+            float gainDb = (n.depthStage == 1) ? kStage1GainDb : kStage2GainDb;
+            float A = powf(10.0f, gainDb / 40.0f);
+            float a0inv = 1.0f / (1.0f + alpha / A);
+            n.b0 = (1.0f + alpha * A) * a0inv;
+            n.b1 = -2.0f * cosw0      * a0inv;
+            n.b2 = (1.0f - alpha * A) * a0inv;
+            n.a1 = -2.0f * cosw0      * a0inv;
+            n.a2 = (1.0f - alpha / A) * a0inv;
+        } else {
+            // Stage 0: transparent pass-through.
+            n.b0 = 1.0f; n.b1 = 0.0f; n.b2 = 0.0f;
+            n.a1 = 0.0f; n.a2 = 0.0f;
+        }
     }
 };
 

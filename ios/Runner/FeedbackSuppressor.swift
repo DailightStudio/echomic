@@ -28,7 +28,6 @@ final class FeedbackSuppressor {
     private static let kFFTSize: Int          = 1024   // power of two for vDSP
     private static let kAnalysisInterval: Int = 256    // ~5 ms @ 48 kHz
     private static let kMaxNotches: Int       = 12     // simultaneous notches
-    private static let kNotchQ: Float         = 28.0   // slightly wider -> surer kill
     private static let kPeakThreshMult: Float = 5.0    // median * 5 = candidate
     private static let kHoldSeconds: Float    = 0.7    // hold before release
     private static let kMaxChannels: Int      = 2
@@ -39,6 +38,16 @@ final class FeedbackSuppressor {
     private static let kGrowthMinRatio: Float = 1.0    // latest >= running average
     private static let kHarmonic2Ratio: Float = 0.6    // PHPR thresholds (power)
     private static let kHarmonic3Ratio: Float = 0.4
+
+    // Constant absolute notch bandwidth (Hz) -> Q varies with frequency, so
+    // low howls get a proportionally wide notch and high howls stay surgical.
+    private static let kNotchBandwidthHz: Float = 50.0
+    private static let kMinNotchQ: Float        = 8.0
+    private static let kMaxNotchQ: Float        = 60.0
+    // Staged depth: a new notch starts as a gentle peaking cut and deepens on
+    // every re-detection (1: -7 dB, 2: -14 dB, 3: full band-reject).
+    private static let kStage1GainDb: Float     = -7.0
+    private static let kStage2GainDb: Float     = -14.0
 
     private static let kMinNotchHz: Float     = 100.0
     // Upper bound is sampleRate * 0.45 (computed in prepare()).
@@ -91,6 +100,7 @@ final class FeedbackSuppressor {
         var bin: Int = 0
         var freq: Float = 0            // tracked (smoothed) center frequency, Hz
         var cyclesSinceRefresh: Int = 0
+        var depthStage: Int = 0        // 0=off, 1=-7dB, 2=-14dB, 3=full notch
 
         // Biquad coefficients (normalized so a0 == 1).
         var b0: Float = 1, b1: Float = 0, b2: Float = 0
@@ -460,8 +470,10 @@ final class FeedbackSuppressor {
         }
         guard slot >= 0 else { return }  // bank full -> ignore until one frees up
 
+        // New notch enters softly (stage 1) and only deepens if the howl is
+        // re-detected, limiting damage when the detector is briefly fooled.
         let freq = interpolateFrequency(bin: bin)
-        setNotchCoefficients(slot: slot, freq: freq)
+        setNotchCoefficients(slot: slot, freq: freq, depthStage: 1)
 
         notches[slot].active = true
         notches[slot].bin = bin
@@ -481,7 +493,10 @@ final class FeedbackSuppressor {
     private func refreshNotch(slot: Int, bin: Int) {
         let newFreq = interpolateFrequency(bin: bin)
         let smoothed = 0.7 * notches[slot].freq + 0.3 * newFreq
-        setNotchCoefficients(slot: slot, freq: smoothed)
+        // Re-detection while already notched -> the cut is not deep enough
+        // yet; step the depth up one stage (capped at full notch).
+        let stage = min(notches[slot].depthStage + 1, 3)
+        setNotchCoefficients(slot: slot, freq: smoothed, depthStage: stage)
         notches[slot].freq = smoothed
         notches[slot].bin = bin
         notches[slot].cyclesSinceRefresh = 0
@@ -521,27 +536,52 @@ final class FeedbackSuppressor {
         }
     }
 
-    /// RBJ cookbook notch (band-reject) biquad, normalized to a0 == 1.
-    private func setNotchCoefficients(slot: Int, freq: Float) {
+    /// Stage 3 is the classic RBJ band-reject notch. Stages 1-2 use the RBJ
+    /// peaking-cut form instead of scaling the notch's b coefficients (which
+    /// would attenuate the whole band, not just the notch center).
+    /// Normalized to a0 == 1.
+    private func setNotchCoefficients(slot: Int, freq: Float, depthStage: Int = 3) {
         let f = min(max(freq, FeedbackSuppressor.kMinNotchHz),
                     sampleRate * FeedbackSuppressor.kMaxNotchFraction)
         let w0 = 2.0 * Float.pi * f / sampleRate
         let cosw0 = cos(w0)
         let sinw0 = sin(w0)
-        let alpha = sinw0 / (2.0 * FeedbackSuppressor.kNotchQ)
 
-        let b0: Float = 1.0
-        let b1 = -2.0 * cosw0
-        let b2: Float = 1.0
-        let a0 = 1.0 + alpha
-        let a1 = -2.0 * cosw0
-        let a2 = 1.0 - alpha
+        // Constant absolute bandwidth -> frequency-proportional Q.
+        let q = min(max(f / FeedbackSuppressor.kNotchBandwidthHz,
+                        FeedbackSuppressor.kMinNotchQ),
+                    FeedbackSuppressor.kMaxNotchQ)
+        let alpha = sinw0 / (2.0 * q)
 
-        let invA0 = 1.0 / a0
-        notches[slot].b0 = b0 * invA0
-        notches[slot].b1 = b1 * invA0
-        notches[slot].b2 = b2 * invA0
-        notches[slot].a1 = a1 * invA0
-        notches[slot].a2 = a2 * invA0
+        let stage = min(max(depthStage, 0), 3)
+        notches[slot].depthStage = stage
+
+        if stage >= 3 {
+            // Full RBJ band-reject notch.
+            let invA0 = 1.0 / (1.0 + alpha)
+            notches[slot].b0 = 1.0 * invA0
+            notches[slot].b1 = -2.0 * cosw0 * invA0
+            notches[slot].b2 = 1.0 * invA0
+            notches[slot].a1 = -2.0 * cosw0 * invA0
+            notches[slot].a2 = (1.0 - alpha) * invA0
+        } else if stage >= 1 {
+            // RBJ peaking EQ cut at the stage gain.
+            let gainDb = stage == 1 ? FeedbackSuppressor.kStage1GainDb
+                                    : FeedbackSuppressor.kStage2GainDb
+            let A = powf(10.0, gainDb / 40.0)
+            let invA0 = 1.0 / (1.0 + alpha / A)
+            notches[slot].b0 = (1.0 + alpha * A) * invA0
+            notches[slot].b1 = -2.0 * cosw0 * invA0
+            notches[slot].b2 = (1.0 - alpha * A) * invA0
+            notches[slot].a1 = -2.0 * cosw0 * invA0
+            notches[slot].a2 = (1.0 - alpha / A) * invA0
+        } else {
+            // Stage 0: transparent pass-through.
+            notches[slot].b0 = 1.0
+            notches[slot].b1 = 0.0
+            notches[slot].b2 = 0.0
+            notches[slot].a1 = 0.0
+            notches[slot].a2 = 0.0
+        }
     }
 }
