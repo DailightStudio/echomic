@@ -10,10 +10,15 @@
 // A mono sum of the input is fed into a ring buffer. Every kAnalysisInterval
 // samples the most recent kFFTSize samples are Hann-windowed and transformed
 // with a self-contained radix-2 Cooley-Tukey FFT. Spectral peaks that exceed
-// the mean magnitude by kPeakThreshMult are treated as nascent feedback and a
-// narrow RBJ notch biquad is armed at that frequency. Notches are refreshed
-// while the peak persists and retired after kHoldCycles analysis cycles. The
-// active notch bank is applied to every channel via Direct Form I.
+// the median magnitude by kPeakThreshMult become howl *candidates*; a notch
+// is only armed once a candidate also passes multi-criteria validation that
+// separates feedback from voiced speech/music:
+//   - IPMP: persists for kMinHitCount consecutive analysis cycles,
+//   - growth: latest magnitude at/above the candidate's running average,
+//   - PHPR: no comparable energy at the 2nd/3rd harmonic (voice has both).
+// Notches are refreshed while the peak persists and retired after a
+// time-based hold (kHoldSeconds). The active notch bank is applied to every
+// channel via Direct Form I.
 //
 // All working storage is pre-allocated as fixed arrays; process() performs no
 // heap allocation. Port of the iOS Swift FeedbackSuppressor.
@@ -24,8 +29,13 @@ public:
     static constexpr int   kMaxNotches       = 12;
     static constexpr float kNotchQ           = 28.0f;
     static constexpr float kPeakThreshMult   = 5.0f;
-    static constexpr int   kHoldCycles       = 100;
+    static constexpr float kHoldSeconds      = 0.7f;
     static constexpr int   kMaxChannels      = 2;
+    static constexpr int   kMaxCandidates    = 24;
+    static constexpr int   kMinHitCount      = 6;     // IPMP: ~32 ms persistence
+    static constexpr float kGrowthMinRatio   = 1.0f;  // latest >= running average
+    static constexpr float kHarmonic2Ratio   = 0.6f;  // PHPR thresholds (power)
+    static constexpr float kHarmonic3Ratio   = 0.4f;
     static constexpr float kMinNotchHz       = 100.0f;
     static constexpr float kMaxNotchFraction = 0.45f;
     static constexpr int   kBinDedupRadius   = 2;
@@ -36,6 +46,7 @@ public:
             window_[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / kFFTSize));
         memset(ring_, 0, sizeof(ring_));
         memset(notches_, 0, sizeof(notches_));
+        memset(candidates_, 0, sizeof(candidates_));
         memset(x1_, 0, sizeof(x1_));
         memset(x2_, 0, sizeof(x2_));
         memset(y1_, 0, sizeof(y1_));
@@ -46,6 +57,9 @@ public:
         // Channel count is taken per-block from process(); the parameter is
         // kept for signature parity with the iOS implementation.
         sampleRate_ = (sampleRate > 0) ? sampleRate : 48000.0f;
+        // Sample-rate independent hold: a notch is retired kHoldSeconds after
+        // its peak was last seen, regardless of the analysis cadence.
+        holdCycles_ = (int)(kHoldSeconds * sampleRate_ / kAnalysisInterval + 0.5f);
         reset();
     }
 
@@ -57,6 +71,7 @@ public:
             notches_[i].active = false;
             notches_[i].cyclesSinceRefresh = 0;
         }
+        memset(candidates_, 0, sizeof(candidates_));
         memset(x1_, 0, sizeof(x1_));
         memset(x2_, 0, sizeof(x2_));
         memset(y1_, 0, sizeof(y1_));
@@ -115,7 +130,18 @@ private:
         float b0{1}, b1{0}, b2{0}, a1{0}, a2{0};
     };
 
+    // A spectral peak being tracked across analysis cycles before it is
+    // allowed to arm a notch (IPMP / growth bookkeeping).
+    struct Candidate {
+        int   bin{0};
+        int   hitCount{0};        // consecutive-detection streak
+        float lastMagnitude{0};
+        float magnitudeSum{0};    // running sum for the growth average
+        bool  seenThisCycle{false};
+    };
+
     float sampleRate_{48000};
+    int   holdCycles_{131};       // recomputed in prepare()
 
     float window_[kFFTSize];
     float windowed_[kFFTSize];
@@ -127,6 +153,7 @@ private:
     int   samplesSinceAnalysis_{0};
 
     Notch notches_[kMaxNotches];
+    Candidate candidates_[kMaxCandidates];
     float x1_[kMaxNotches * kMaxChannels];
     float x2_[kMaxNotches * kMaxChannels];
     float y1_[kMaxNotches * kMaxChannels];
@@ -193,23 +220,99 @@ private:
         int maxBin  = std::min(half - 2, (int)(maxHz / binHz + 0.5f));
         if (minBin > maxBin) return;
 
-        // Mean magnitude (skip DC bin 0).
-        float mean = 0;
-        for (int i = 1; i < half; i++) mean += magnitudes_[i];
-        mean /= (half - 1);
-        if (mean <= 0) return;
-        float threshold = mean * kPeakThreshMult;
+        for (int i = 0; i < kMaxCandidates; i++)
+            candidates_[i].seenThisCycle = false;
+
+        // Median-based threshold: unlike the mean, the median is not inflated
+        // by a few strong tonal peaks, so loud howls cannot mask quieter ones.
+        float median = computeMedian(half);
+        float threshold = std::max(median * kPeakThreshMult, 1e-6f);
 
         int bin = minBin;
         while (bin <= maxBin) {
             float m = magnitudes_[bin];
             if (m > threshold && m > magnitudes_[bin - 1] && m >= magnitudes_[bin + 1]) {
-                armNotch(bin);
+                if (isRealHowl(bin, half)) armNotch(bin);
                 bin += kBinDedupRadius + 1;
             } else {
                 bin++;
             }
         }
+
+        // Candidates not re-detected this cycle lose their streak: howling is
+        // sustained, so a single miss resets the persistence counter (IPMP).
+        for (int i = 0; i < kMaxCandidates; i++) {
+            if (!candidates_[i].seenThisCycle) candidates_[i].hitCount = 0;
+        }
+    }
+
+    // Median of magnitudes_[1..half-1] (DC excluded) via nth_element on a
+    // stack scratch copy. O(n) average; no heap allocation.
+    float computeMedian(int half) {
+        const int count = half - 1;
+        if (count <= 0) return 0;
+        float scratch[kFFTSize / 2];
+        std::copy(magnitudes_ + 1, magnitudes_ + half, scratch);
+        std::nth_element(scratch, scratch + count / 2, scratch + count);
+        return scratch[count / 2];
+    }
+
+    // Multi-criteria validation that separates feedback from voiced content.
+    bool isRealHowl(int bin, int half) {
+        Candidate& c = candidateForBin(bin);
+        c.seenThisCycle = true;
+        c.bin = bin;
+        c.hitCount++;
+        c.lastMagnitude = magnitudes_[bin];
+        c.magnitudeSum += magnitudes_[bin];
+        if (c.hitCount >= 64) {  // keep the running average finite on long howls
+            c.hitCount /= 2;
+            c.magnitudeSum *= 0.5f;
+        }
+
+        // IPMP: must persist for kMinHitCount consecutive analysis cycles.
+        if (c.hitCount < kMinHitCount) return false;
+
+        // Growth: feedback builds up, so the latest magnitude must sit at or
+        // above the candidate's running average (transient speech peaks decay).
+        float avg = c.magnitudeSum / c.hitCount;
+        if (c.lastMagnitude < avg * kGrowthMinRatio) return false;
+
+        // PHPR: voiced speech carries strong 2nd/3rd harmonics; a howl is a
+        // near-pure sinusoid. Comparable energy at 2f or 3f -> treat as voice.
+        int bin2 = bin * 2;
+        int bin3 = bin * 3;
+        if (bin2 + 1 < half) {
+            float h2 = std::max(magnitudes_[bin2 - 1],
+                                std::max(magnitudes_[bin2], magnitudes_[bin2 + 1]));
+            if (h2 > c.lastMagnitude * kHarmonic2Ratio) return false;
+        }
+        if (bin3 + 1 < half) {
+            float h3 = std::max(magnitudes_[bin3 - 1],
+                                std::max(magnitudes_[bin3], magnitudes_[bin3 + 1]));
+            if (h3 > c.lastMagnitude * kHarmonic3Ratio) return false;
+        }
+        return true;
+    }
+
+    // Find the candidate tracking this bin (within the dedup radius) or claim
+    // a slot for a fresh streak, evicting the weakest streak when full.
+    Candidate& candidateForBin(int bin) {
+        int freeSlot = -1, weakest = 0;
+        for (int i = 0; i < kMaxCandidates; i++) {
+            if (candidates_[i].hitCount > 0) {
+                if (std::abs(candidates_[i].bin - bin) <= kBinDedupRadius)
+                    return candidates_[i];
+                if (candidates_[i].hitCount < candidates_[weakest].hitCount)
+                    weakest = i;
+            } else if (freeSlot < 0) {
+                freeSlot = i;
+            }
+        }
+        int slot = (freeSlot >= 0) ? freeSlot : weakest;
+        candidates_[slot] = Candidate{};
+        candidates_[slot].bin = bin;
+        return candidates_[slot];
     }
 
     void armNotch(int bin) {
@@ -242,7 +345,7 @@ private:
         for (int i = 0; i < kMaxNotches; i++) {
             if (!notches_[i].active) continue;
             notches_[i].cyclesSinceRefresh++;
-            if (notches_[i].cyclesSinceRefresh >= kHoldCycles)
+            if (notches_[i].cyclesSinceRefresh >= holdCycles_)
                 notches_[i].active = false;
         }
     }

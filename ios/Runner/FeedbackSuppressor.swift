@@ -11,11 +11,13 @@ import Foundation
 ///   1. Mono-sum the interleaved input into a circular analysis buffer.
 ///   2. Every `analysisInterval` accumulated samples, run a Hann-windowed real
 ///      FFT over the most recent `fftSize` samples and look for spectral peaks
-///      that tower over the local mean (a feedback fingerprint).
-///   3. Each detected peak grabs (or refreshes) one of `maxNotches` biquad notch
-///      filters, which are then applied in-place to every channel.
-///   4. A notch that has not been refreshed for `holdCycles` analysis cycles is
-///      released so the affected band reopens once the feedback is gone.
+///      that tower over the spectral *median* (robust against loud tonal peaks).
+///   3. Each peak becomes a howl candidate that must pass multi-criteria
+///      validation before arming a notch — persistence over consecutive cycles
+///      (IPMP), magnitude growth, and missing 2nd/3rd harmonics (PHPR), which
+///      together separate feedback from voiced speech/music.
+///   4. A notch that has not been refreshed within `kHoldSeconds` is released
+///      so the affected band reopens once the feedback is gone.
 ///
 /// Everything is sized up front in `prepare(...)`; the audio-callback hot path
 /// never allocates (no malloc / array growth / append / removeFirst).
@@ -27,9 +29,16 @@ final class FeedbackSuppressor {
     private static let kAnalysisInterval: Int = 256    // ~5 ms @ 48 kHz
     private static let kMaxNotches: Int       = 12     // simultaneous notches
     private static let kNotchQ: Float         = 28.0   // slightly wider -> surer kill
-    private static let kPeakThreshMult: Float = 5.0    // mean * 5 = candidate
-    private static let kHoldCycles: Int       = 100    // ~1 s before release
+    private static let kPeakThreshMult: Float = 5.0    // median * 5 = candidate
+    private static let kHoldSeconds: Float    = 0.7    // hold before release
     private static let kMaxChannels: Int      = 2
+
+    // Howl-candidate validation (mirrors the Android C++ implementation).
+    private static let kMaxCandidates: Int    = 24
+    private static let kMinHitCount: Int      = 6      // IPMP: ~32 ms persistence
+    private static let kGrowthMinRatio: Float = 1.0    // latest >= running average
+    private static let kHarmonic2Ratio: Float = 0.6    // PHPR thresholds (power)
+    private static let kHarmonic3Ratio: Float = 0.4
 
     private static let kMinNotchHz: Float     = 100.0
     // Upper bound is sampleRate * 0.45 (computed in prepare()).
@@ -63,6 +72,10 @@ final class FeedbackSuppressor {
     // Magnitude-squared spectrum (fftSize/2 bins).
     private var magnitudes: [Float]
 
+    // Scratch buffer for the in-place median quickselect (no allocation in
+    // the audio callback).
+    private var medianScratch: [Float]
+
     // MARK: - Circular analysis buffer (mono)
 
     private var ring: [Float]
@@ -85,6 +98,21 @@ final class FeedbackSuppressor {
 
     private var notches: [Notch]
 
+    /// A spectral peak being tracked across analysis cycles before it is
+    /// allowed to arm a notch (IPMP / growth bookkeeping).
+    private struct Candidate {
+        var bin: Int = 0
+        var hitCount: Int = 0          // consecutive-detection streak
+        var lastMagnitude: Float = 0
+        var magnitudeSum: Float = 0    // running sum for the growth average
+        var seenThisCycle: Bool = false
+    }
+
+    private var candidates: [Candidate]
+
+    // Time-based hold converted to analysis cycles in prepare().
+    private var holdCycles: Int = 131
+
     // Per-(notch, channel) Direct Form I delay state.
     // Flat layout: index = notchIndex * kMaxChannels + channel.
     private var x1: [Float]
@@ -104,10 +132,13 @@ final class FeedbackSuppressor {
         realp      = [Float](repeating: 0, count: half)
         imagp      = [Float](repeating: 0, count: half)
         magnitudes = [Float](repeating: 0, count: half)
+        medianScratch = [Float](repeating: 0, count: half)
         ring       = [Float](repeating: 0, count: n)
 
         notches = [Notch](repeating: Notch(),
                           count: FeedbackSuppressor.kMaxNotches)
+        candidates = [Candidate](repeating: Candidate(),
+                                 count: FeedbackSuppressor.kMaxCandidates)
 
         let stateCount = FeedbackSuppressor.kMaxNotches * FeedbackSuppressor.kMaxChannels
         x1 = [Float](repeating: 0, count: stateCount)
@@ -133,6 +164,11 @@ final class FeedbackSuppressor {
         self.sampleRate = sampleRate > 0 ? sampleRate : 48_000
         self.channelCount = min(max(1, channelCount), FeedbackSuppressor.kMaxChannels)
 
+        // Sample-rate independent hold: a notch is retired kHoldSeconds after
+        // its peak was last seen, regardless of the analysis cadence.
+        holdCycles = Int((FeedbackSuppressor.kHoldSeconds * self.sampleRate
+                          / Float(FeedbackSuppressor.kAnalysisInterval)).rounded())
+
         if fftSetup == nil {
             fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
         }
@@ -150,6 +186,7 @@ final class FeedbackSuppressor {
             notches[i].active = false
             notches[i].cyclesSinceRefresh = 0
         }
+        for i in candidates.indices { candidates[i] = Candidate() }
         for i in x1.indices { x1[i] = 0; x2[i] = 0; y1[i] = 0; y2[i] = 0 }
     }
 
@@ -265,8 +302,9 @@ final class FeedbackSuppressor {
         ageNotches()
     }
 
-    /// Scan the magnitude spectrum for local maxima that exceed mean * threshold
-    /// within the allowed frequency band and assign them to notch filters.
+    /// Scan the magnitude spectrum for local maxima that exceed median *
+    /// threshold within the allowed frequency band, validate each one as real
+    /// howling (IPMP / growth / PHPR) and assign survivors to notch filters.
     private func detectAndArm(half: Int) {
         let fftSize = FeedbackSuppressor.kFFTSize
         let binHz = sampleRate / Float(fftSize)
@@ -276,30 +314,129 @@ final class FeedbackSuppressor {
         let maxBin = min(half - 2, Int((maxHz / binHz).rounded()))
         guard minBin <= maxBin else { return }
 
-        // Mean magnitude over the full half-spectrum (DC excluded) as the noise
-        // floor reference. magnitudes[0] is DC; skip it.
-        var mean: Float = 0
-        magnitudes.withUnsafeBufferPointer { mp in
-            // vDSP_meanv over bins [1, half).
-            vDSP_meanv(mp.baseAddress!.advanced(by: 1), 1, &mean, vDSP_Length(half - 1))
-        }
-        guard mean > 0 else { return }
-        let threshold = mean * FeedbackSuppressor.kPeakThreshMult
+        for i in candidates.indices { candidates[i].seenThisCycle = false }
 
-        magnitudes.withUnsafeBufferPointer { mp in
-            var bin = minBin
-            while bin <= maxBin {
-                let m = mp[bin]
-                if m > threshold && m > mp[bin - 1] && m >= mp[bin + 1] {
+        // Median-based threshold: unlike the mean, the median is not inflated
+        // by a few strong tonal peaks, so loud howls cannot mask quieter ones.
+        let median = computeMedian(half: half)
+        let threshold = max(median * FeedbackSuppressor.kPeakThreshMult, 1e-6)
+
+        var bin = minBin
+        while bin <= maxBin {
+            let m = magnitudes[bin]
+            if m > threshold && m > magnitudes[bin - 1] && m >= magnitudes[bin + 1] {
+                if isRealHowl(bin: bin, half: half) {
                     armNotch(forBin: bin)
-                    // Skip the immediate neighbourhood so a single broad peak
-                    // does not consume several notches.
-                    bin += FeedbackSuppressor.kBinDedupRadius + 1
-                } else {
-                    bin += 1
                 }
+                // Skip the immediate neighbourhood so a single broad peak
+                // does not consume several notches.
+                bin += FeedbackSuppressor.kBinDedupRadius + 1
+            } else {
+                bin += 1
             }
         }
+
+        // Candidates not re-detected this cycle lose their streak: howling is
+        // sustained, so a single miss resets the persistence counter (IPMP).
+        for i in candidates.indices where !candidates[i].seenThisCycle {
+            candidates[i].hitCount = 0
+        }
+    }
+
+    /// Median of magnitudes[1..<half] (DC excluded) via in-place quickselect
+    /// on the preallocated scratch buffer. No heap allocation.
+    private func computeMedian(half: Int) -> Float {
+        let count = half - 1
+        guard count > 0 else { return 0 }
+
+        let k = count / 2
+        var result: Float = 0
+        medianScratch.withUnsafeMutableBufferPointer { sp in
+            magnitudes.withUnsafeBufferPointer { mp in
+                for i in 0..<count { sp[i] = mp[i + 1] }
+            }
+            // Hoare quickselect for the k-th smallest element.
+            var lo = 0
+            var hi = count - 1
+            while lo < hi {
+                let pivot = sp[(lo + hi) / 2]
+                var i = lo
+                var j = hi
+                while i <= j {
+                    while sp[i] < pivot { i += 1 }
+                    while sp[j] > pivot { j -= 1 }
+                    if i <= j {
+                        sp.swapAt(i, j)
+                        i += 1
+                        j -= 1
+                    }
+                }
+                if k <= j { hi = j } else if k >= i { lo = i } else { break }
+            }
+            result = sp[k]
+        }
+        return result
+    }
+
+    /// Multi-criteria validation that separates feedback from voiced content.
+    private func isRealHowl(bin: Int, half: Int) -> Bool {
+        let idx = candidateIndex(forBin: bin)
+        candidates[idx].seenThisCycle = true
+        candidates[idx].bin = bin
+        candidates[idx].hitCount += 1
+        candidates[idx].lastMagnitude = magnitudes[bin]
+        candidates[idx].magnitudeSum += magnitudes[bin]
+        if candidates[idx].hitCount >= 64 {  // keep the running average finite
+            candidates[idx].hitCount /= 2
+            candidates[idx].magnitudeSum *= 0.5
+        }
+
+        // IPMP: must persist for kMinHitCount consecutive analysis cycles.
+        if candidates[idx].hitCount < FeedbackSuppressor.kMinHitCount { return false }
+
+        // Growth: feedback builds up, so the latest magnitude must sit at or
+        // above the candidate's running average (transient speech peaks decay).
+        let avg = candidates[idx].magnitudeSum / Float(candidates[idx].hitCount)
+        if candidates[idx].lastMagnitude < avg * FeedbackSuppressor.kGrowthMinRatio {
+            return false
+        }
+
+        // PHPR: voiced speech carries strong 2nd/3rd harmonics; a howl is a
+        // near-pure sinusoid. Comparable energy at 2f or 3f -> treat as voice.
+        let m = candidates[idx].lastMagnitude
+        let bin2 = bin * 2
+        let bin3 = bin * 3
+        if bin2 + 1 < half {
+            let h2 = max(magnitudes[bin2 - 1], max(magnitudes[bin2], magnitudes[bin2 + 1]))
+            if h2 > m * FeedbackSuppressor.kHarmonic2Ratio { return false }
+        }
+        if bin3 + 1 < half {
+            let h3 = max(magnitudes[bin3 - 1], max(magnitudes[bin3], magnitudes[bin3 + 1]))
+            if h3 > m * FeedbackSuppressor.kHarmonic3Ratio { return false }
+        }
+        return true
+    }
+
+    /// Find the candidate tracking this bin (within the dedup radius) or claim
+    /// a slot for a fresh streak, evicting the weakest streak when full.
+    private func candidateIndex(forBin bin: Int) -> Int {
+        var freeSlot = -1
+        var weakest = 0
+        for i in 0..<FeedbackSuppressor.kMaxCandidates {
+            if candidates[i].hitCount > 0 {
+                if abs(candidates[i].bin - bin) <= FeedbackSuppressor.kBinDedupRadius {
+                    return i
+                }
+                if candidates[i].hitCount < candidates[weakest].hitCount {
+                    weakest = i
+                }
+            } else if freeSlot < 0 {
+                freeSlot = i
+            }
+        }
+        let slot = freeSlot >= 0 ? freeSlot : weakest
+        candidates[slot] = Candidate(bin: bin)
+        return slot
     }
 
     /// Refresh an existing notch on this bin (or a near neighbour), or claim a
@@ -342,7 +479,7 @@ final class FeedbackSuppressor {
     private func ageNotches() {
         for i in 0..<FeedbackSuppressor.kMaxNotches where notches[i].active {
             notches[i].cyclesSinceRefresh += 1
-            if notches[i].cyclesSinceRefresh >= FeedbackSuppressor.kHoldCycles {
+            if notches[i].cyclesSinceRefresh >= holdCycles {
                 notches[i].active = false
             }
         }
