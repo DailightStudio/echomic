@@ -42,9 +42,10 @@ public:
         memset(y2_, 0, sizeof(y2_));
     }
 
-    void prepare(float sampleRate, int channelCount) {
-        sampleRate_   = (sampleRate > 0) ? sampleRate : 48000.0f;
-        channelCount_ = std::min(std::max(1, channelCount), kMaxChannels);
+    void prepare(float sampleRate, int /*channelCount*/) {
+        // Channel count is taken per-block from process(); the parameter is
+        // kept for signature parity with the iOS implementation.
+        sampleRate_ = (sampleRate > 0) ? sampleRate : 48000.0f;
         reset();
     }
 
@@ -106,19 +107,6 @@ public:
         }
     }
 
-    // Fills w[0..n-1] with a Hann window.
-    static void hann_window(float* w, int n) {
-        for (int i = 0; i < n; i++)
-            w[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / n));
-    }
-
-    // In-place forward FFT of a real-valued signal.
-    // re[] holds the real input on entry (im[] should be all zeros); on return
-    // re[]/im[] hold the complex spectrum. n must be a power of two.
-    static void rfft(float* re, float* im, int n) {
-        fft(re, im, n);
-    }
-
 private:
     struct Notch {
         bool  active{false};
@@ -128,7 +116,6 @@ private:
     };
 
     float sampleRate_{48000};
-    int   channelCount_{1};
 
     float window_[kFFTSize];
     float windowed_[kFFTSize];

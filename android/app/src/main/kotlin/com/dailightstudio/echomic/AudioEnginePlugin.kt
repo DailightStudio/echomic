@@ -103,6 +103,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     }
 
     private fun startPolling() {
+        stopPolling()  // ensure a single polling loop even on repeated onListen
         pollingHandler = android.os.Handler(android.os.Looper.getMainLooper())
         val runnable = object : Runnable {
             override fun run() {
