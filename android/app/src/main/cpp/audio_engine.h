@@ -40,7 +40,7 @@ public:
     void setMasterGain(float gain)    { masterGain_.store(gain); }
     void setGateThreshold(float db)         { gate_.setThresholdDb(db); }
     void setEQBand(int band, float gainDb)   { eq_.setBandGain(band, gainDb); }
-    void setFrequencyShiftEnabled(bool en)   { freqShifter_.enabled = en; }
+    void setFrequencyShiftEnabled(bool en)   { freqShifter_.enabled.store(en); }
     float getRmsLevel() const         { return rmsLevel_.load(); }
     bool isRunning() const            { return running_.load(); }
 

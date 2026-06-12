@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 
 // Peak-envelope soft noise gate.
@@ -17,10 +18,12 @@ public:
     }
 
     void setThresholdDb(float db) {
-        threshold_ = powf(10.0f, db / 20.0f);
+        db = std::clamp(db, -80.0f, 0.0f);
+        threshold_.store(powf(10.0f, db / 20.0f), std::memory_order_relaxed);
     }
 
     void process(float* samples, int frameCount, int channels) {
+        const float threshold = threshold_.load(std::memory_order_relaxed);
         for (int f = 0; f < frameCount; f++) {
             int base = f * channels;
             float peak = 0;
@@ -32,9 +35,9 @@ public:
             else
                 envelope_ = releaseCoeff_ * envelope_ + (1.0f - releaseCoeff_) * peak;
 
-            float gain = (envelope_ >= threshold_)
+            float gain = (envelope_ >= threshold)
                 ? 1.0f
-                : (envelope_ / (threshold_ + 1e-8f));
+                : (envelope_ / (threshold + 1e-8f));
 
             for (int ch = 0; ch < channels; ch++)
                 samples[base + ch] *= gain;
@@ -42,7 +45,7 @@ public:
     }
 
 private:
-    float threshold_{0.02f};
+    std::atomic<float> threshold_{0.02f};  // written by control thread, read by audio thread
     float envelope_{0};
     float attackCoeff_{0.9f};
     float releaseCoeff_{0.9999f};

@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 
 // SSB (single-sideband) frequency shifter via an IIR Hilbert transform pair.
 // The two all-pass cascades (path A / path B) maintain a ~90-degree phase
@@ -16,7 +17,7 @@
 // stored once. Phasor is renormalized every 4096 frames to fight drift.
 class FrequencyShifter {
 public:
-    bool enabled{true};
+    std::atomic<bool> enabled{true};  // toggled by control thread, read by audio thread
 
     void prepare(float sampleRate, float shiftHz = 8.0f) {
         float sr = std::max(sampleRate, 8000.0f);
@@ -35,7 +36,7 @@ public:
     }
 
     void process(float* samples, int frameCount, int channels) {
-        if (!enabled || frameCount <= 0) return;
+        if (!enabled.load(std::memory_order_relaxed) || frameCount <= 0) return;
         const int chCount = std::min(channels, 2);
         static constexpr float a0c = 0.4021921162f, a1c = 0.8561710882f;
         static constexpr float b0c = 0.6923878f,    b1c = 0.9360654f;
