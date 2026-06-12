@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  echomic-builder:
+    build: .
+    container_name: echomic-android-builder
+    volumes:
+      - .:/workspace
+    environment:
+      - ANDROID_HOME=/opt/android-sdk
+      - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    stdin_open: true
+    tty: true
