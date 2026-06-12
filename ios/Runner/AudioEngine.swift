@@ -2,11 +2,13 @@ import AVFoundation
 
 /// Low-latency full-duplex engine on top of AVAudioEngine.
 ///
-/// Routing: inputNode -> (echo applied in a tap) -> playerNode -> mainMixer ->
-/// output. We tap the input node, run gain + echo on the captured PCM, and
-/// immediately schedule the processed buffer on an AVAudioPlayerNode so it
-/// reaches the speaker with minimal added latency.
-final class AudioEngine {
+/// Routing: AVCaptureSession mic -> (echo applied in capture callback) ->
+/// playerNode -> mainMixer -> output. We capture the mic via AVCaptureSession
+/// (so the AVAudioSession category can stay `.playback` and route to A2DP BT
+/// speakers), run gain + echo on the captured PCM, and immediately schedule the
+/// processed buffer on an AVAudioPlayerNode so it reaches the speaker with
+/// minimal added latency.
+final class AudioEngine: NSObject {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
@@ -21,7 +23,6 @@ final class AudioEngine {
 
     private var gain: Float = 1.0
     private(set) var isRunning = false
-    private var tapInstalled = false
 
     private var processingFormat: AVAudioFormat?
 
@@ -29,14 +30,26 @@ final class AudioEngine {
 
     private var observers: [NSObjectProtocol] = []
 
+    // AVCaptureSession — mic capture without overriding .playback category
+    private var captureSession: AVCaptureSession?
+    private let captureQueue = DispatchQueue(label: "echomic.capture", qos: .userInteractive)
+    private var audioConverter: AVAudioConverter?
+
     // Realtime buffer pool: avoid heap allocation on the audio callback.
     private var outputBufferPool: [AVAudioPCMBuffer] = []
     private var poolIndex = 0
+    // Free-list for the output pool. Only ever touched on captureQueue
+    // (the free-list search in handle() + the scheduleBuffer completion).
+    private var bufferFree: [Bool] = []
     private var interleavedScratch: [Float] = []
 
     // Cached echo params so they survive a prepare()/restart.
     private var lastDelayMs: Float = 150.0
     private var lastFeedback: Float = 0.3
+
+    // Cached EQ/reverb state so they survive a prepare()/restart.
+    private var lastEQGains: [Float] = [Float](repeating: 0, count: 5)
+    private var lastReverbMix: Float = 0
 
     private var masterVolume: Float = 1.0
 
@@ -49,7 +62,10 @@ final class AudioEngine {
     func setEchoFeedback(_ value: Float) { lastFeedback = value; echo.setFeedback(value) }
 
     // wetDryMix: 0.0(dry)~1.0(wet) -> AVAudioUnitReverb expects 0~100.
-    func setReverbMix(_ mix: Float) { reverb.wetDryMix = min(max(mix, 0), 1) * 100 }
+    func setReverbMix(_ mix: Float) {
+        lastReverbMix = min(max(mix, 0), 1)
+        reverb.wetDryMix = lastReverbMix * 100
+    }
 
     func setMasterVolume(_ volume: Float) { masterVolume = min(max(volume, 0), 1) }
 
@@ -59,7 +75,9 @@ final class AudioEngine {
 
     func setEQBand(_ band: Int, gainDb: Float) {
         guard band >= 0, band < eq.bands.count else { return }
-        eq.bands[band].gain = min(max(gainDb, -12), 12)
+        let clamped = min(max(gainDb, -12), 12)
+        lastEQGains[band] = clamped
+        eq.bands[band].gain = clamped
     }
 
     // MARK: - Lifecycle
@@ -69,23 +87,17 @@ final class AudioEngine {
         do {
             try configureSession()
 
-            let input = engine.inputNode
-            let inputFormat = input.outputFormat(forBus: 0)
-
-            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-                NSLog("echomic: invalid input format sr=\(inputFormat.sampleRate) ch=\(inputFormat.channelCount)")
-                return false
-            }
-
-            // Use a non-interleaved float format that matches the hardware rate.
+            // .playback disables AVAudioEngine's inputNode, so derive the
+            // processing format from the session sample rate and capture the mic
+            // via AVCaptureSession instead.
+            let sampleRate = AVAudioSession.sharedInstance().sampleRate > 0
+                ? AVAudioSession.sharedInstance().sampleRate : 48_000
             guard let format = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
-                sampleRate: inputFormat.sampleRate,
-                channels: inputFormat.channelCount,
+                sampleRate: sampleRate,
+                channels: 1,
                 interleaved: false
-            ) else {
-                return false
-            }
+            ) else { return false }
             processingFormat = format
 
             echo.prepare(sampleRate: Float(format.sampleRate),
@@ -119,13 +131,13 @@ final class AudioEngine {
                 eq.bands[i].frequency  = freq
                 eq.bands[i].filterType = type
                 eq.bands[i].bandwidth  = bw
-                eq.bands[i].gain       = 0
+                eq.bands[i].gain       = lastEQGains[i]
                 eq.bands[i].bypass     = false
             }
 
             engine.attach(reverb)
             reverb.loadFactoryPreset(.largeHall)
-            reverb.wetDryMix = 0  // off by default
+            reverb.wetDryMix = lastReverbMix * 100  // restore cached mix
             engine.connect(player, to: eq, format: format)
             engine.connect(eq, to: reverb, format: format)
             engine.connect(reverb, to: engine.mainMixerNode, format: format)
@@ -137,6 +149,7 @@ final class AudioEngine {
             outputBufferPool = (0..<poolSize).compactMap {
                 _ in AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(maxFrames))
             }
+            bufferFree = [Bool](repeating: true, count: poolSize)
             interleavedScratch = [Float](repeating: 0, count: maxFrames * Int(format.channelCount))
             poolIndex = 0
 
@@ -144,14 +157,9 @@ final class AudioEngine {
             try engine.start()
             player.play()
 
-            // Tap must be installed AFTER engine.start()+player.play() so the
+            // Capture session must start AFTER engine.start()+player.play() so the
             // player is already running when the first captured buffer arrives.
-            let bufferSize: AVAudioFrameCount = 256  // ~5 ms @ 48 kHz
-            input.installTap(onBus: 0, bufferSize: bufferSize, format: format) {
-                [weak self] buffer, _ in
-                self?.handle(inputBuffer: buffer, targetFormat: format)
-            }
-            tapInstalled = true
+            try setupCaptureSession(processingFormat: format)
 
             registerSessionObservers()
 
@@ -167,10 +175,10 @@ final class AudioEngine {
     func stop() {
         removeSessionObservers()
 
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
-        }
+        captureSession?.stopRunning()
+        captureQueue.sync {}   // wait for any in-flight captureOutput callback
+        captureSession = nil
+        audioConverter = nil
         if player.isPlaying { player.stop() }
         if engine.isRunning { engine.stop() }
         engine.disconnectNodeOutput(reverb)
@@ -189,42 +197,38 @@ final class AudioEngine {
 
     private func configureSession() throws {
         let session = AVAudioSession.sharedInstance()
-        // .defaultToSpeaker removed — it overrides BT routing and forces phone
-        // speaker even when a Bluetooth speaker is connected.
-        try session.setCategory(.playAndRecord,
-                                mode: .measurement,
-                                options: [.allowBluetoothHFP])
-        try session.setPreferredIOBufferDuration(0.005)  // 5 ms
+        // .playback enables A2DP BT output; mic is captured via AVCaptureSession instead.
+        try session.setCategory(.playback, mode: .default, options: [])
+        try session.setPreferredIOBufferDuration(0.005)
         try session.setPreferredSampleRate(48_000)
         try session.setActive(true)
-        applyOutputOverride()
     }
 
-    /// Route audio to BT speaker when available, built-in speaker otherwise.
-    ///
-    /// iOS .playAndRecord defaults to earpiece unless overridden.  When a BT
-    /// device is present we pin the input to the built-in mic explicitly —
-    /// that signals to iOS that we want phone-mic input + BT A2DP/HFP output
-    /// (rather than using the BT device for both directions via HFP).
-    private func applyOutputOverride() {
-        let session = AVAudioSession.sharedInstance()
-        let btTypes: Set<AVAudioSession.Port> = [
-            .bluetoothA2DP, .bluetoothHFP, .bluetoothLE
-        ]
+    private func setupCaptureSession(processingFormat: AVAudioFormat) throws {
+        let cs = AVCaptureSession()
+        cs.automaticallyConfiguresApplicationAudioSession = false
 
-        let hasBTOutput = session.currentRoute.outputs.contains { btTypes.contains($0.portType) }
-        let hasBTAvail  = session.availableInputs?.contains { btTypes.contains($0.portType) } ?? false
-
-        if hasBTOutput || hasBTAvail {
-            // Pin input to built-in mic so iOS routes output to BT speaker.
-            if let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
-                try? session.setPreferredInput(mic)
-            }
-            try? session.overrideOutputAudioPort(.none)
-        } else {
-            // No BT — force main speaker (avoid earpiece).
-            try? session.overrideOutputAudioPort(.speaker)
+        guard let mic = AVCaptureDevice.default(for: .audio) else {
+            throw NSError(domain: "echomic", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "No mic found"])
         }
+        let micInput = try AVCaptureDeviceInput(device: mic)
+        guard cs.canAddInput(micInput) else {
+            throw NSError(domain: "echomic", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot add mic input"])
+        }
+        cs.addInput(micInput)
+
+        let audioOut = AVCaptureAudioDataOutput()
+        audioOut.setSampleBufferDelegate(self, queue: captureQueue)
+        guard cs.canAddOutput(audioOut) else {
+            throw NSError(domain: "echomic", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot add audio output"])
+        }
+        cs.addOutput(audioOut)
+
+        captureSession = cs
+        cs.startRunning()
     }
 
     // MARK: - Session recovery
@@ -303,6 +307,24 @@ final class AudioEngine {
         }
 
         observers = [interruption, routeChange]
+
+        // captureSession is non-nil here: registerSessionObservers() runs after
+        // setupCaptureSession() succeeds.
+        let captureError = center.addObserver(
+            forName: .AVCaptureSessionRuntimeError,
+            object: captureSession,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.isRunning else { return }
+            guard !self.isReconfiguring else { return }
+            self.isReconfiguring = true
+            DispatchQueue.main.async {
+                self.stop()
+                _ = self.start()
+                self.isReconfiguring = false
+            }
+        }
+        observers.append(captureError)
     }
 
     private func removeSessionObservers() {
@@ -313,28 +335,44 @@ final class AudioEngine {
     }
 
     private func resumeEngine() {
+        try? configureSession()
         try? engine.start()
         player.play()
-        applyOutputOverride()
+        if captureSession?.isRunning == false {
+            captureSession?.startRunning()
+        }
     }
 
     /// Runs gain + echo over the captured buffer and schedules it for playback.
     private func handle(inputBuffer: AVAudioPCMBuffer, targetFormat: AVAudioFormat) {
         guard !outputBufferPool.isEmpty else { return }
 
-        let outBuffer = outputBufferPool[poolIndex % outputBufferPool.count]
-        poolIndex &+= 1
+        // Find a free buffer; drop the frame if all are in flight.
+        var freeIdx = -1
+        for i in 0..<bufferFree.count where bufferFree[i] {
+            freeIdx = i
+            break
+        }
+        guard freeIdx >= 0 else { return }
+        bufferFree[freeIdx] = false
+        let outBuffer = outputBufferPool[freeIdx]
 
         let frameCount = Int(inputBuffer.frameLength)
         let channels   = Int(targetFormat.channelCount)
         guard frameCount > 0,
               frameCount <= Int(outBuffer.frameCapacity),
-              frameCount * channels <= interleavedScratch.count else { return }
+              frameCount * channels <= interleavedScratch.count else {
+            bufferFree[freeIdx] = true   // return buffer to pool on early exit
+            return
+        }
 
         outBuffer.frameLength = inputBuffer.frameLength
 
         guard let src = inputBuffer.floatChannelData,
-              let dst = outBuffer.floatChannelData else { return }
+              let dst = outBuffer.floatChannelData else {
+            bufferFree[freeIdx] = true
+            return
+        }
 
         let inChCount = Int(inputBuffer.format.channelCount)
 
@@ -399,6 +437,62 @@ final class AudioEngine {
             }
         }
 
-        player.scheduleBuffer(outBuffer, completionHandler: nil)
+        let idx = freeIdx
+        player.scheduleBuffer(outBuffer) { [weak self] in
+            self?.captureQueue.async { self?.bufferFree[idx] = true }
+        }
+    }
+}
+
+extension AudioEngine: AVCaptureAudioDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard let fmt = processingFormat else { return }
+
+        guard let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let nativeFormat = AVAudioFormat(cmAudioFormatDescription: fmtDesc) else { return }
+
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0 else { return }
+
+        // Allocate buffer matching the capture device's native format
+        guard let srcBuffer = AVAudioPCMBuffer(pcmFormat: nativeFormat,
+                                               frameCapacity: frameCount) else { return }
+        srcBuffer.frameLength = frameCount
+
+        let copyStatus = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frameCount),
+            into: srcBuffer.mutableAudioBufferList)
+        guard copyStatus == noErr else { return }
+
+        if nativeFormat.isEqual(fmt) {
+            handle(inputBuffer: srcBuffer, targetFormat: fmt)
+            return
+        }
+
+        // Formats differ — use AVAudioConverter
+        if audioConverter == nil || !audioConverter!.inputFormat.isEqual(nativeFormat) {
+            audioConverter = AVAudioConverter(from: nativeFormat, to: fmt)
+        }
+        guard let converter = audioConverter else { return }
+
+        let ratio = fmt.sampleRate / nativeFormat.sampleRate
+        let outFrames = AVAudioFrameCount(Double(frameCount) * ratio + 1)
+        guard let dstBuffer = AVAudioPCMBuffer(pcmFormat: fmt,
+                                               frameCapacity: outFrames) else { return }
+
+        var consumed = false
+        var convError: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            if consumed { outStatus.pointee = .noDataNow; return nil }
+            consumed = true
+            outStatus.pointee = .haveData
+            return srcBuffer
+        }
+        converter.convert(to: dstBuffer, error: &convError, withInputFrom: inputBlock)
+        guard convError == nil else { return }
+
+        handle(inputBuffer: dstBuffer, targetFormat: fmt)
     }
 }

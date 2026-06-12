@@ -10,6 +10,11 @@
 #include "echo_effect.h"
 #include "compressor.h"
 #include "reverb.h"
+#include "high_pass_filter.h"
+#include "noise_gate.h"
+#include "frequency_shifter.h"
+#include "eq5band.h"
+#include "feedback_suppressor.h"
 
 /**
  * Full-duplex low-latency engine built on two Oboe streams.
@@ -33,6 +38,9 @@ public:
     void setEchoFeedback(float feedback) { echo_.setFeedback(feedback); }
     void setReverbWet(float wet)      { reverb_.setWet(wet); }
     void setMasterGain(float gain)    { masterGain_.store(gain); }
+    void setGateThreshold(float db)         { gate_.setThresholdDb(db); }
+    void setEQBand(int band, float gainDb)   { eq_.setBandGain(band, gainDb); }
+    void setFrequencyShiftEnabled(bool en)   { freqShifter_.enabled = en; }
     float getRmsLevel() const         { return rmsLevel_.load(); }
     bool isRunning() const            { return running_.load(); }
 
@@ -54,6 +62,11 @@ private:
     EchoEffect echo_;
     Compressor comp_;
     ReverbEffect reverb_;
+    HighPassFilter hpf_;
+    NoiseGate gate_;
+    FrequencyShifter freqShifter_;
+    EQ5Band eq_;
+    FeedbackSuppressor suppressor_;
     std::atomic<float> masterGain_{1.0f};
     std::atomic<float> rmsLevel_{0.0f};
     std::atomic<float> gain_{1.0f};

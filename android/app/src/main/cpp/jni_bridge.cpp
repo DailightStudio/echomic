@@ -81,4 +81,22 @@ Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetMasterGain(JNIEnv * /
     if (gEngine) gEngine->setMasterGain(static_cast<float>(gain));
 }
 
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetGateThreshold(
+    JNIEnv * /*env*/, jobject /*thiz*/, jfloat db) {
+    if (gEngine) gEngine->setGateThreshold(static_cast<float>(db));
+}
+
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetEQBand(
+    JNIEnv * /*env*/, jobject /*thiz*/, jint band, jfloat gainDb) {
+    if (gEngine) gEngine->setEQBand(static_cast<int>(band), static_cast<float>(gainDb));
+}
+
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetFrequencyShift(
+    JNIEnv * /*env*/, jobject /*thiz*/, jboolean enabled) {
+    if (gEngine) gEngine->setFrequencyShiftEnabled(enabled == JNI_TRUE);
+}
+
 }  // extern "C"

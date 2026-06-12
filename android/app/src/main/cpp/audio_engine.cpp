@@ -81,6 +81,12 @@ bool AudioEngine::openStreams() {
     reverb_.prepare(sampleRate_);
     reverb_.reset();
 
+    hpf_.prepare(sampleRate_);
+    gate_.prepare(sampleRate_);
+    freqShifter_.prepare(static_cast<float>(sampleRate_));
+    eq_.prepare(static_cast<float>(sampleRate_));
+    suppressor_.prepare(static_cast<float>(sampleRate_), channelCount_);
+
     // FIFO holds ~200 ms of audio; plenty of headroom over the callback size.
     const int frames = std::max(sampleRate_ / 5, 2048);
     fifoCapacity_ = frames * channelCount_;
@@ -129,10 +135,16 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream *stream,
     if (stream->getDirection() == oboe::Direction::Input) {
         // Process mic input then push into the FIFO for the output stream.
         auto *in = static_cast<float *>(audioData);
-        comp_.process(in, numFrames, channels);      // compress first
-        echo_.process(in, numFrames, gain_.load());  // then echo
-        reverb_.process(in, numFrames, channels);    // then reverb
-        comp_.limit(in, numFrames * channels);       // then limit
+        // iOS signal flow: HPF -> Gate -> Comp -> Echo -> Limit -> Suppressor -> FreqShifter -> EQ -> Reverb
+        hpf_.process(in, numFrames, channels);
+        gate_.process(in, numFrames, channels);
+        comp_.process(in, numFrames, channels);
+        echo_.process(in, numFrames, gain_.load());
+        comp_.limit(in, numFrames * channels);
+        suppressor_.process(in, numFrames, channels);
+        freqShifter_.process(in, numFrames, channels);
+        eq_.process(in, numFrames, channels);
+        reverb_.process(in, numFrames, channels);
 
         // 마스터볼륨
         const float master = masterGain_.load();

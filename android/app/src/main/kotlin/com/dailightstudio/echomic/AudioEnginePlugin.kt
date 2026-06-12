@@ -82,6 +82,22 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 nativeSetMasterGain(gain)
                 result.success(null)
             }
+            "setGateThreshold" -> {
+                val db = (call.argument<Double>("db") ?: -40.0).toFloat()
+                nativeSetGateThreshold(db)
+                result.success(null)
+            }
+            "setEQBand" -> {
+                val band = call.argument<Int>("band") ?: 0
+                val gainDb = (call.argument<Double>("gainDb") ?: 0.0).toFloat()
+                nativeSetEQBand(band, gainDb)
+                result.success(null)
+            }
+            "setFrequencyShift" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: true
+                nativeSetFrequencyShift(enabled)
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
     }
@@ -123,6 +139,9 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private external fun nativeIsRunning(): Boolean
     private external fun nativeSetReverbWet(wet: Float)
     private external fun nativeSetMasterGain(gain: Float)
+    private external fun nativeSetGateThreshold(db: Float)
+    private external fun nativeSetEQBand(band: Int, gainDb: Float)
+    private external fun nativeSetFrequencyShift(enabled: Boolean)
 
     companion object {
         private const val CHANNEL = "com.dailightstudio.echomic/audio"
