@@ -1,5 +1,21 @@
 import AVFoundation
 
+enum AudioEngineError: LocalizedError {
+    /// Mic permission has never been requested — caller must call
+    /// AVCaptureDevice.requestAccess(for: .audio) and retry start().
+    case microphoneAccessNotRequested
+    case microphoneAccessDenied
+
+    var errorDescription: String? {
+        switch self {
+        case .microphoneAccessNotRequested:
+            return "Microphone access not requested yet"
+        case .microphoneAccessDenied:
+            return "Microphone access denied"
+        }
+    }
+}
+
 /// Low-latency full-duplex engine on top of AVAudioEngine.
 ///
 /// Routing: AVCaptureSession mic -> (echo applied in capture callback) ->
@@ -226,11 +242,19 @@ final class AudioEngine: NSObject {
     }
 
     private func setupCaptureSession(processingFormat: AVAudioFormat) throws {
-        // Fail fast (and cleanly) if mic permission was denied/revoked instead
-        // of letting startRunning() spin up a session that never delivers audio.
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            throw NSError(domain: "echomic", code: -4,
-                          userInfo: [NSLocalizedDescriptionKey: "Microphone access denied"])
+        // Fail fast (and cleanly) if mic permission is missing instead of
+        // letting startRunning() spin up a session that never delivers audio.
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            break
+        case .notDetermined:
+            // Distinct error so the caller can requestAccess and retry start()
+            // rather than treating a never-asked state as a hard denial.
+            throw AudioEngineError.microphoneAccessNotRequested
+        case .denied, .restricted:
+            throw AudioEngineError.microphoneAccessDenied
+        @unknown default:
+            throw AudioEngineError.microphoneAccessDenied
         }
 
         let cs = AVCaptureSession()
