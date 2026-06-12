@@ -62,6 +62,11 @@ bool AudioEngine::openStreams() {
         ->setSampleRate(sampleRate_)
         ->setChannelCount(channelCount_)
         ->setInputPreset(oboe::InputPreset::VoicePerformance)
+        // BT routes (e.g. HFP mics) may only offer 8/16 kHz PCM16 mono; let
+        // Oboe resample/convert to the output format instead of failing start().
+        ->setChannelConversionAllowed(true)
+        ->setFormatConversionAllowed(true)
+        ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
         ->setDataCallback(this)
         ->setErrorCallback(this);
 
@@ -71,12 +76,14 @@ bool AudioEngine::openStreams() {
         return false;
     }
 
-    // The negotiated input format may differ from what we requested (e.g. on
-    // BT routes). A rate/channel mismatch would feed mis-clocked samples into
-    // the filters, so treat it as a hard failure.
+    // With conversion enabled above, Oboe delivers the input already matched
+    // to the requested rate/channels, so a mismatch here should be impossible.
+    // Keep the check as a safety net since mis-clocked samples would corrupt
+    // every filter downstream.
     if (inputStream_->getSampleRate() != sampleRate_ ||
         inputStream_->getChannelCount() != channelCount_) {
-        LOGE("Input/output format mismatch: in rate=%d ch=%d, out rate=%d ch=%d",
+        LOGE("Format negotiation failed despite conversion enabled: "
+             "in rate=%d ch=%d, out rate=%d ch=%d",
              inputStream_->getSampleRate(), inputStream_->getChannelCount(),
              sampleRate_, channelCount_);
         return false;
