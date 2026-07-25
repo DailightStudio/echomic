@@ -86,3 +86,8 @@ android/app/src/main/cpp/oboe/
 !**/ios/**/default.mode2v3
 !**/ios/**/default.pbxuser
 !**/ios/**/default.perspectivev3
+
+# 봇 로컬 상태 (PC별 — 공유 금지)
+.agent_memory.md
+.agent_memory.md.lock
+.claude/
