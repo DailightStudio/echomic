@@ -1,0 +1,93 @@
+#!/bin/sh
+# push 전에 이 레포에 맞는 검사를 돌린다. 실패가 있으면 push 를 막는다.
+#
+# 이 파일의 원본은 server-agent/gate/pre-push 다. 고칠 일이 생기면 거기서 고치고
+# `python ops.py gate --apply` 로 전 레포에 다시 깔아라. 레포마다 손으로 고치면 갈라진다.
+#
+# 왜 생겼나(2026-09-11 실측): kakao-bot 리뷰 커밋 20건 중 10건이 "이번 지적의 원인은
+# 내 직전 수정" 이라고 스스로 적고 있었다. "내가 넣은 가드가 또 죽어 있었다" 는 줄까지
+# 있었다. 리뷰는 매번 새로 찾아야 하는 그물이라 촘촘하게 해도 구멍 생기는 속도가 안 줄어든다.
+#
+# 판정은 세 갈래다. 통과 / 실패 / 검사 불가.
+# 검사 불가는 도구나 의존성이 없어서 못 돌린 것이다. 실패로 치면 그 PC 에선 아무것도
+# push 못 하고, 통과로 치면 확인 안 한 걸 확인했다고 속이는 것이다. 그래서 따로 센다.
+#
+# 넘기려면 git push --no-verify. 왜 넘겼는지는 커밋 메시지에 적어라.
+set -e
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+FAILED=0
+SKIPPED=""
+
+note_skip() { SKIPPED="$SKIPPED
+  - $1"; }
+
+# ── 파이썬 ──────────────────────────────────────────────────────────────────
+if ls ./*.py >/dev/null 2>&1; then
+  PY="$ROOT/.venv/Scripts/python.exe"
+  [ -x "$PY" ] || PY="$ROOT/.venv/bin/python"
+  if [ ! -x "$PY" ]; then
+    if [ -f requirements.txt ]; then
+      # ⚠️ 시스템 파이썬으로 넘어가지 않는다. requirements.txt 가 있다는 건 이 레포가
+      #    의존성을 따로 쓴다는 뜻이라, 시스템 파이썬으로 돌리면 의존성이 없어서 줄줄이
+      #    실패한다. 그건 코드가 깨진 게 아니라 검사를 못 돌린 것이다.
+      #    (server-agent 에서 실측: 격리 클론에서 7종이 ModuleNotFoundError 로 죽었다)
+      PY=""
+      note_skip "requirements.txt 가 있는데 .venv 가 없음 (python -m venv .venv 후 pip install -r requirements.txt)"
+    else
+      PY=$(command -v python3 || command -v python || true)
+      [ -n "$PY" ] || note_skip "파이썬을 못 찾아서 문법 검사를 못 돌림"
+    fi
+  fi
+  if [ -n "$PY" ]; then
+    echo "문법 확인"
+    # 가상환경과 외부 코드는 뺀다. 우리가 쓴 것만 본다.
+    if ! "$PY" -m compileall -q -x '(\.venv|node_modules|__pycache__|\.git)' . >/dev/null; then
+      echo "  문법 오류 있음" >&2
+      FAILED=1
+    fi
+    if [ -f run_tests.py ]; then
+      echo "하네스"
+      "$PY" run_tests.py || FAILED=1
+    else
+      note_skip "run_tests.py 가 없어서 하네스는 안 돌림"
+    fi
+  fi
+fi
+
+# ── 타입스크립트 ────────────────────────────────────────────────────────────
+if [ -f tsconfig.json ]; then
+  if [ ! -d node_modules ]; then
+    note_skip "node_modules 가 없어서 타입 검사를 못 돌림 (npm i 하면 돎)"
+  elif ! command -v npx >/dev/null 2>&1; then
+    note_skip "npx 가 없어서 타입 검사를 못 돌림"
+  elif grep -q '"typecheck"' package.json 2>/dev/null; then
+    # 레포가 자기 typecheck 를 정의해 뒀으면 그걸 쓴다. 모노레포는 워크스페이스마다
+    # 설정이 달라서 루트에서 맨 tsc 를 돌리면 거짓 경보가 난다 — dd-trip 이 그랬다.
+    # 거기는 node --experimental-strip-types 로 도는 패키지라 import 에 .ts 를 붙이는 게
+    # 맞는데, 루트 tsc 는 그걸 오류로 본다. 판정 기준은 그 레포가 정한다.
+    echo "타입 확인 (npm run typecheck)"
+    if ! npm run --silent typecheck; then
+      echo "  타입 오류 있음" >&2
+      FAILED=1
+    fi
+  else
+    echo "타입 확인 (tsc --noEmit)"
+    if ! npx --no-install tsc --noEmit; then
+      echo "  타입 오류 있음" >&2
+      FAILED=1
+    fi
+  fi
+fi
+
+# ── 결과 ────────────────────────────────────────────────────────────────────
+if [ -n "$SKIPPED" ]; then
+  echo "검사 불가(통과 아님, 미검증임):$SKIPPED"
+fi
+if [ "$FAILED" != "0" ]; then
+  echo "" >&2
+  echo "push 를 막았음. 위 실패를 고치고 다시 밀어주십쇼." >&2
+  echo "정말 넘겨야 되면 git push --no-verify (이유는 커밋 메시지에)" >&2
+  exit 1
+fi
+exit 0
