@@ -1,0 +1,2 @@
+# 훅은 sh 가 실행한다. CRLF 로 체크아웃되면 맥에서 조용히 안 돈다.
+githooks/* text eol=lf
