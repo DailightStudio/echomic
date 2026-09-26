@@ -108,6 +108,19 @@ class _HomeScreenState extends State<HomeScreen> {
     await p.setBool('freqShift', _freqShiftEnabled);
   }
 
+  // One-tap karaoke-room sound: short slapback echo with a few repeats + some reverb.
+  void _applyKaraokePreset() {
+    setState(() {
+      _echoDelayMs = 120.0;
+      _echoFeedback = 0.35;
+      _reverbMix = 0.25;
+    });
+    _engine.setEchoDelay(_echoDelayMs);
+    _engine.setEchoFeedback(_echoFeedback);
+    _engine.setReverbMix(_reverbMix);
+    _savePrefs();
+  }
+
   void _sendParam(VoidCallback send) {
     final now = DateTime.now();
     if (_lastParamSend == null ||
@@ -233,6 +246,14 @@ class _HomeScreenState extends State<HomeScreen> {
                       }
                     : null,
                 onChangeEnd: (_) => _savePrefs(),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: _applyKaraokePreset,
+                  icon: const Icon(Icons.mic_external_on),
+                  label: const Text('노래방 에코'),
+                ),
               ),
               _SliderTile(
                 label: 'Echo Delay',
