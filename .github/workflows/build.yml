@@ -13,6 +13,10 @@ on:
         description: "iOS: upload the signed build to App Store Connect (needs the app record)"
         type: boolean
         default: false
+      screenshots:
+        description: "Capture App Store screenshots on the 6.9-inch iPhone simulator"
+        type: boolean
+        default: false
 
 concurrency:
   group: build-${{ github.ref }}
@@ -82,3 +86,37 @@ jobs:
         with:
           name: echomic-ios-${{ github.run_number }}
           path: ${{ runner.temp }}/export/*.ipa
+
+  screenshots:
+    if: ${{ inputs.screenshots }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build ios --simulator --debug
+      - name: Boot 6.9-inch iPhone, capture light + dark
+        run: |
+          set -e
+          DEV=$(xcrun simctl list devices available | grep -E "iPhone 1[6-9] Pro Max" | tail -1 | grep -oE "[0-9A-F]{8}-[0-9A-F-]{27}")
+          echo "device: $DEV"
+          xcrun simctl boot "$DEV"
+          xcrun simctl bootstatus "$DEV" -b
+          xcrun simctl status_bar "$DEV" override --time 9:41 --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
+          xcrun simctl install "$DEV" build/ios/iphonesimulator/Runner.app
+          mkdir -p shots
+          for mode in light dark; do
+            xcrun simctl ui "$DEV" appearance $mode
+            xcrun simctl terminate "$DEV" com.dailightstudio.echomic || true
+            xcrun simctl launch "$DEV" com.dailightstudio.echomic
+            sleep 12
+            xcrun simctl io "$DEV" screenshot "shots/iphone69_$mode.png"
+          done
+          sips -g pixelWidth -g pixelHeight shots/*.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: shots/*.png
