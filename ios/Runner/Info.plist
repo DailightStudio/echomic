@@ -25,7 +25,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>echomic needs the microphone to capture your voice and play it back live with gain and echo.</string>
+	<string>노래하는 목소리를 마이크로 받아 에코를 입혀 실시간으로 들려주기 위해 마이크를 사용합니다.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

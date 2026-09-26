@@ -30,3 +30,13 @@ delayed   = circularBuffer.read(delaySamples)
 out       = in * gain + delayed * feedback
 circularBuffer.write(out)
 ```
+
+## Release
+
+Android (Play): `flutter build appbundle --release` → `build/app/outputs/bundle/release/app-release.aab`.
+Signing reads `android/key.properties` (gitignored) pointing at the upload keystore kept outside the repo;
+without it the release build falls back to the debug key and Play rejects it. targetSdk follows
+`flutter.targetSdkVersion` (Play requires 36 from 2026-08-31).
+
+iOS (App Store): needs macOS + Xcode. Team `HB85X53L9D`, bundle `com.dailightstudio.echomic`.
+`flutter build ipa --release`, then upload with Transporter / `xcrun altool`.
