@@ -10,8 +10,7 @@ flutter pub get
 # Android (minSdk 23, builds the native Oboe engine via CMake)
 flutter run -d android
 
-# iOS (open ios/Runner.xcworkspace in Xcode for first signing, then)
-cd ios && pod install && cd ..
+# iOS (plugins come in via Swift Package Manager; no CocoaPods)
 flutter run -d ios
 ```
 
@@ -38,5 +37,7 @@ Signing reads `android/key.properties` (gitignored) pointing at the upload keyst
 without it the release build falls back to the debug key and Play rejects it. targetSdk follows
 `flutter.targetSdkVersion` (Play requires 36 from 2026-08-31).
 
-iOS (App Store): needs macOS + Xcode. Team `HB85X53L9D`, bundle `com.dailightstudio.echomic`.
-`flutter build ipa --release`, then upload with Transporter / `xcrun altool`.
+iOS (App Store): no Mac needed — `.github/workflows/build.yml` on a GitHub macOS runner.
+Actions → Build → Run workflow: `ios_signed` = signed IPA artifact, `ios_upload` = send to
+App Store Connect (the app record must exist; the ASC API cannot create apps).
+Team `HB85X53L9D`, bundle `com.dailightstudio.echomic`, secrets `ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_P8`.
