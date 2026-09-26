@@ -42,4 +42,4 @@ URL: https://dailightstudio.github.io/echomic/privacy.html (docs/privacy.html)
 ## 준비된 파일
 - Play 아이콘 512: assets/icon/play_icon_512.png
 - 원본 1024: assets/icon/icon_1024.png
-- 스크린샷: 아직 없음 (실기기 캡처 필요 — Play 최소 2장, App Store 6.9형 최소 1장)
+- App Store 6.9형 스크린샷: assets/screenshots/iphone69_home.png (1320x2868, CI 시뮬레이터 캡처)

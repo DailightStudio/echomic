@@ -98,7 +98,7 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build ios --simulator --debug
-      - name: Boot 6.9-inch iPhone, capture light + dark
+      - name: Boot 6.9-inch iPhone, capture home screen
         run: |
           set -e
           DEV=$(xcrun simctl list devices available | grep -E "iPhone 1[6-9] Pro Max" | tail -1 | grep -oE "[0-9A-F]{8}-[0-9A-F-]{27}")
@@ -108,13 +108,10 @@ jobs:
           xcrun simctl status_bar "$DEV" override --time 9:41 --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
           xcrun simctl install "$DEV" build/ios/iphonesimulator/Runner.app
           mkdir -p shots
-          for mode in light dark; do
-            xcrun simctl ui "$DEV" appearance $mode
-            xcrun simctl terminate "$DEV" com.dailightstudio.echomic || true
-            xcrun simctl launch "$DEV" com.dailightstudio.echomic
-            sleep 12
-            xcrun simctl io "$DEV" screenshot "shots/iphone69_$mode.png"
-          done
+          # The app is always dark-themed, so one capture covers both appearances.
+          xcrun simctl launch "$DEV" com.dailightstudio.echomic
+          sleep 12
+          xcrun simctl io "$DEV" screenshot shots/iphone69_home.png
           sips -g pixelWidth -g pixelHeight shots/*.png
       - uses: actions/upload-artifact@v4
         with:
