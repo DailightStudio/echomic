@@ -23,7 +23,8 @@
 ## 카테고리
 Play: 음악 및 오디오 / App Store: 음악
 
-## 개인정보처리방침 (URL 필요 — 아래 본문을 웹에 게시)
+## 개인정보처리방침
+URL: https://dailightstudio.github.io/echomic/privacy.html (docs/privacy.html)
 에코마이크(Dailight Studio)는 마이크 소리를 휴대폰 안에서 실시간으로 처리해 바로 재생할 뿐,
 녹음하거나 저장하거나 외부로 전송하지 않습니다. 개인정보와 사용 기록을 수집하지 않으며,
 광고와 분석 도구를 사용하지 않습니다. 문의: wjs9280@gmail.com
