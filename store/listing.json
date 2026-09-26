@@ -1,0 +1,41 @@
+{
+  "ios_bundle": "com.dailightstudio.echomic",
+  "android_package": "com.dailightstudio.echomic",
+  "ios_locale": "ko",
+  "play_language": "ko-KR",
+  "name": "에코마이크 - 노래방 에코 마이크",
+  "subtitle": "내 폰이 노래방 에코 마이크로",
+  "short_description": "이어폰 끼고 MR 틀고 노래하면 내 목소리에 노래방 에코가 걸립니다.",
+  "description": "에코마이크는 휴대폰을 노래방 마이크로 바꿔 줍니다.\n\n이어폰을 끼고 유튜브나 멜론으로 MR을 틀어 두세요. 에코마이크를 켜고 노래하면 MR 위에 에코와 리버브가 입혀진 내 목소리가 실시간으로 들립니다.\n\n- 노래방 에코 버튼 한 번으로 바로 노래방 소리\n- 에코 길이, 반복, 리버브, 5밴드 EQ 직접 조절\n- 목소리 증폭 켜기/끄기\n- 하울링 억제와 노이즈 게이트 내장\n- 낮은 지연시간 오디오 처리\n\n유선 이어폰 사용을 권장합니다. 블루투스 이어폰은 소리가 늦게 들릴 수 있습니다.\n\n마이크 소리는 기기 안에서만 처리되며 녹음, 저장, 전송하지 않습니다.",
+  "keywords": "노래방,에코,마이크,카라오케,노래,MR,리버브,보컬,에코마이크,코인노래방,karaoke,echo,mic",
+  "promotional_text": "이어폰 끼고 MR 틀고 노래하면 내 목소리에 노래방 에코가 걸립니다.",
+  "support_url": "https://dailightstudio.github.io/echomic/",
+  "marketing_url": "",
+  "privacy_url": "https://dailightstudio.github.io/echomic/privacy.html",
+  "contact_email": "wjs9280@gmail.com",
+  "copyright": "2026 Dailight Studio",
+  "version": "1.0.0",
+  "release_notes": "첫 버전입니다.",
+  "ios_whats_new": "",
+  "ios_category": "MUSIC",
+  "territories": [
+    "KOR"
+  ],
+  "review": {
+    "notes": "에코마이크는 마이크 입력에 에코와 리버브를 입혀 실시간으로 이어폰이나 스피커로 들려주는 노래방 마이크 앱입니다. 로그인이나 계정이 필요 없습니다. 시작 버튼을 누르고 마이크 권한을 허용한 뒤 말하거나 노래하면 됩니다. 스피커 사용 시 하울링을 피하려면 이어폰 착용을 권장합니다. 오디오는 기기 안에서만 처리되며 녹음, 저장, 전송하지 않습니다.",
+    "demo_account_required": false
+  },
+  "screenshots": {
+    "ios": {
+      "APP_IPHONE_67": [
+        "../assets/screenshots/iphone69_home.png"
+      ]
+    },
+    "play_phone": [
+      "../assets/play/phone_2_caption.png",
+      "../assets/play/phone_1_home.png"
+    ],
+    "play_icon": "../assets/icon/play_icon_512.png",
+    "play_feature": "../assets/play/feature_1024x500.png"
+  }
+}
