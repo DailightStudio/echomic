@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
+    paths-ignore: ["docs/**", "**/*.md", "assets/screenshots/**"]
   workflow_dispatch:
     inputs:
       ios_signed:
@@ -18,8 +19,9 @@ on:
         type: boolean
         default: false
 
+# Per event: a push must not cancel a manual signing/upload run in flight.
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
