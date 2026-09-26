@@ -524,8 +524,9 @@ extension AudioEngine: AVCaptureAudioDataOutputSampleBufferDelegate {
                        from connection: AVCaptureConnection) {
         guard let fmt = processingFormat else { return }
 
-        guard let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let nativeFormat = AVAudioFormat(cmAudioFormatDescription: fmtDesc) else { return }
+        guard let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+        // Non-failable in the current SDK (was optional in older ones).
+        let nativeFormat = AVAudioFormat(cmAudioFormatDescription: fmtDesc)
 
         let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
         guard frameCount > 0 else { return }
