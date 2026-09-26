@@ -71,6 +71,11 @@ final class AudioEnginePlugin: NSObject {
                 engine.setEQBand(band, gainDb: Float(gainDb))
             }
             result(nil)
+        case "setBoost":
+            if let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool {
+                engine.setBoost(enabled)
+            }
+            result(nil)
         case "setFrequencyShift":
             if let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool {
                 engine.setFrequencyShiftEnabled(enabled)

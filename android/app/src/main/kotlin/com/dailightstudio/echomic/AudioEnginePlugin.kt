@@ -93,6 +93,11 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 nativeSetEQBand(band, gainDb)
                 result.success(null)
             }
+            "setBoost" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: true
+                nativeSetBoost(enabled)
+                result.success(null)
+            }
             "setFrequencyShift" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: true
                 nativeSetFrequencyShift(enabled)
@@ -142,6 +147,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private external fun nativeSetMasterGain(gain: Float)
     private external fun nativeSetGateThreshold(db: Float)
     private external fun nativeSetEQBand(band: Int, gainDb: Float)
+    private external fun nativeSetBoost(enabled: Boolean)
     private external fun nativeSetFrequencyShift(enabled: Boolean)
 
     companion object {

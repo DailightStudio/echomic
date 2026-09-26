@@ -34,6 +34,7 @@ public:
     void stop();
 
     void setGain(float gain) { gain_.store(gain); }
+    void setBoost(bool enabled)       { boost_.store(enabled); }
     void setEchoDelay(float delayMs) { echo_.setDelayMs(delayMs); }
     void setEchoFeedback(float feedback) { echo_.setFeedback(feedback); }
     void setReverbWet(float wet)      { reverb_.setWet(wet); }
@@ -70,6 +71,8 @@ private:
     std::atomic<float> masterGain_{1.0f};
     std::atomic<float> rmsLevel_{0.0f};
     std::atomic<float> gain_{1.0f};
+    // false = no amplification: input gain pinned to 1.0 and compressor makeup off.
+    std::atomic<bool> boost_{true};
 
     // Lock-free single-producer/single-consumer ring buffer of float samples
     // carrying processed audio from the input callback to the output callback.

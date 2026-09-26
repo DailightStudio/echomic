@@ -94,6 +94,12 @@ Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetEQBand(
 }
 
 JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetBoost(
+    JNIEnv * /*env*/, jobject /*thiz*/, jboolean enabled) {
+    if (gEngine) gEngine->setBoost(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
 Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetFrequencyShift(
     JNIEnv * /*env*/, jobject /*thiz*/, jboolean enabled) {
     if (gEngine) gEngine->setFrequencyShiftEnabled(enabled == JNI_TRUE);

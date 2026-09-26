@@ -38,6 +38,8 @@ final class AudioEngine: NSObject {
     private let gate = NoiseGate()
 
     private var gain: Float = 1.0
+    // false = no amplification: input gain pinned to 1.0 and compressor makeup off.
+    private var boostEnabled = true
     private(set) var isRunning = false
 
     private var processingFormat: AVAudioFormat?
@@ -91,6 +93,7 @@ final class AudioEngine: NSObject {
     // MARK: - Parameters
 
     func setGain(_ value: Float) { gain = value }
+    func setBoost(_ enabled: Bool) { boostEnabled = enabled }
     func setEchoDelay(_ delayMs: Float) { lastDelayMs = delayMs; echo.setDelayMs(delayMs) }
     func setEchoFeedback(_ value: Float) { lastFeedback = value; echo.setFeedback(value) }
 
@@ -233,7 +236,9 @@ final class AudioEngine: NSObject {
     private func configureSession() throws {
         let session = AVAudioSession.sharedInstance()
         // .playback enables A2DP BT output; mic is captured via AVCaptureSession instead.
-        try session.setCategory(.playback, mode: .default, options: [])
+        // .mixWithOthers keeps other apps' audio (MR from YouTube/Melon) playing
+        // under the mic instead of being stopped when we activate.
+        try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         try session.setPreferredIOBufferDuration(0.005)
         try session.setPreferredSampleRate(48_000)
         try session.setActive(true)
@@ -473,8 +478,10 @@ final class AudioEngine: NSObject {
         interleavedScratch.withUnsafeMutableBufferPointer { ptr in
             hpf.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
             gate.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
-            comp.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
-            echo.process(ptr.baseAddress!, frameCount: frameCount, gain: gain)
+            comp.process(ptr.baseAddress!, frameCount: frameCount, channels: channels,
+                         applyMakeup: boostEnabled)
+            echo.process(ptr.baseAddress!, frameCount: frameCount,
+                         gain: boostEnabled ? gain : 1)
             comp.limit(ptr.baseAddress!, count: frameCount * channels)
             suppressor.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
             freqShifter.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)

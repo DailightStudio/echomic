@@ -47,6 +47,12 @@ class AudioEngine {
     await _channel.invokeMethod<void>('setGain', {'gain': gain});
   }
 
+  /// Amplification on/off. When off, input gain is pinned to unity and the
+  /// compressor's +12 dB makeup is skipped, so the voice is not made louder.
+  Future<void> setBoost(bool enabled) async {
+    await _channel.invokeMethod<void>('setBoost', {'enabled': enabled});
+  }
+
   /// Echo delay time in milliseconds (0 .. 500).
   Future<void> setEchoDelay(double delayMs) async {
     await _channel.invokeMethod<void>('setEchoDelay', {'delayMs': delayMs});

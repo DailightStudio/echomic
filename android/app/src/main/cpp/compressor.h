@@ -26,7 +26,9 @@ public:
     }
 
     // Call BEFORE EchoEffect. Compresses and applies makeup gain in-place.
-    void process(float* samples, int numFrames, int numChannels) {
+    // applyMakeup=false: compress only (no +12 dB boost) — the "no boost" mode.
+    void process(float* samples, int numFrames, int numChannels, bool applyMakeup) {
+        const float makeup = applyMakeup ? makeupLinear_ : 1.0f;
         for (int f = 0; f < numFrames; ++f) {
             float peak = 0.0f;
             int base = f * numChannels;
@@ -39,7 +41,7 @@ public:
                 envelope_ = releaseCoeff_ * envelope_ + (1.0f - releaseCoeff_) * peak;
 
             float gainDb = computeGain(envelope_);
-            float linearGain = std::pow(10.0f, gainDb / 20.0f) * makeupLinear_;
+            float linearGain = std::pow(10.0f, gainDb / 20.0f) * makeup;
 
             // Soft gate: -50 dBFS 이하 신호는 makeup gain을 줄여 노이즈 증폭 방지
             static constexpr float kGateThresh = 0.003162f;  // -50 dBFS

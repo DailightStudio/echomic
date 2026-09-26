@@ -22,6 +22,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _busy = false;
   String _status = 'Idle';
 
+  bool _boostEnabled = true;
   double _gain = 2.0;
   double _echoDelayMs = 0.0;
   double _echoFeedback = 0.0;
@@ -77,6 +78,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadPrefs() async {
     final p = await SharedPreferences.getInstance();
     setState(() {
+      _boostEnabled = p.getBool('boost') ?? true;
       _gain = p.getDouble('gain') ?? 2.0;
       _echoDelayMs = p.getDouble('echoDelayMs') ?? 0.0;
       _echoFeedback = p.getDouble('echoFeedback') ?? 0.0;
@@ -93,6 +95,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _savePrefs() async {
     final p = await SharedPreferences.getInstance();
+    await p.setBool('boost', _boostEnabled);
     await p.setDouble('gain', _gain);
     await p.setDouble('echoDelayMs', _echoDelayMs);
     await p.setDouble('echoFeedback', _echoFeedback);
@@ -143,6 +146,7 @@ class _HomeScreenState extends State<HomeScreen> {
           );
         }
 
+        await _engine.setBoost(_boostEnabled);
         await _engine.setGain(_gain);
         await _engine.setEchoDelay(_echoDelayMs);
         await _engine.setEchoFeedback(_echoFeedback);
@@ -200,16 +204,34 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 8),
               _LevelMeter(level: _rmsLevel),
               const SizedBox(height: 8),
+              SwitchListTile(
+                title: const Text('증폭'),
+                subtitle: Text(_boostEnabled
+                    ? '목소리를 키워서 내보냅니다'
+                    : '목소리를 원래 크기 그대로 내보냅니다'),
+                value: _boostEnabled,
+                onChanged: (v) {
+                  setState(() => _boostEnabled = v);
+                  _engine.setBoost(v);
+                  _savePrefs();
+                },
+                dense: true,
+              ),
               _SliderTile(
                 label: 'Gain',
                 value: _gain,
                 min: 1.0,
                 max: 8.0,
-                valueLabel: '${_gain.toStringAsFixed(2)}x',
-                onChanged: (v) {
-                  setState(() => _gain = v);
-                  _sendParam(() => _engine.setGain(v));
-                },
+                valueLabel: _boostEnabled
+                    ? '${_gain.toStringAsFixed(2)}x'
+                    : '1.00x',
+                // Native pins gain to 1.0 while boost is off.
+                onChanged: _boostEnabled
+                    ? (v) {
+                        setState(() => _gain = v);
+                        _sendParam(() => _engine.setGain(v));
+                      }
+                    : null,
                 onChangeEnd: (_) => _savePrefs(),
               ),
               _SliderTile(
@@ -336,7 +358,7 @@ class _SliderTile extends StatelessWidget {
   final double min;
   final double max;
   final String valueLabel;
-  final ValueChanged<double> onChanged;
+  final ValueChanged<double>? onChanged; // null = disabled
   final ValueChanged<double>? onChangeEnd; // nullable
 
   @override

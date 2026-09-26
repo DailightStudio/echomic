@@ -156,8 +156,9 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream *stream,
         // iOS signal flow: HPF -> Gate -> Comp -> Echo -> Limit -> Suppressor -> FreqShifter -> EQ -> Reverb
         hpf_.process(in, numFrames, channels);
         gate_.process(in, numFrames, channels);
-        comp_.process(in, numFrames, channels);
-        echo_.process(in, numFrames, gain_.load());
+        const bool boost = boost_.load();
+        comp_.process(in, numFrames, channels, boost);
+        echo_.process(in, numFrames, boost ? gain_.load() : 1.0f);
         comp_.limit(in, numFrames * channels);
         suppressor_.process(in, numFrames, channels);
         freqShifter_.process(in, numFrames, channels);

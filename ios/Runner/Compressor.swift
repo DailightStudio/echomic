@@ -38,7 +38,10 @@ final class Compressor {
     }
 
     // Call BEFORE EchoEffect. Operates on interleaved float samples.
-    func process(_ samples: UnsafeMutablePointer<Float>, frameCount: Int, channels: Int) {
+    // applyMakeup=false: compress only (no +12 dB boost) — the "no boost" mode.
+    func process(_ samples: UnsafeMutablePointer<Float>, frameCount: Int, channels: Int,
+                 applyMakeup: Bool) {
+        let makeup = applyMakeup ? makeupLinear : 1
         for f in 0..<frameCount {
             let base = f * channels
             var peak: Float = 0
@@ -53,7 +56,7 @@ final class Compressor {
             }
 
             let gainDb = computeGain(envelope)
-            let linearGain = pow(10.0, gainDb / 20.0) * makeupLinear
+            let linearGain = pow(10.0, gainDb / 20.0) * makeup
 
             // Soft gate: -50 dBFS 이하 신호는 makeup gain을 페이드
             let kGateThresh: Float = 0.003162  // -50 dBFS
