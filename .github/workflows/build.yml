@@ -81,6 +81,12 @@ jobs:
           xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
             -exportPath "$RUNNER_TEMP/export" "${AUTH[@]}"
+          if [ "$DESTINATION" = export ]; then
+            # Apple's upload validation, synchronously. Rejections otherwise arrive only by
+            # account e-mail and the build just never shows up in /v1/builds.
+            mkdir -p ~/.appstoreconnect/private_keys && cp "$KEY" ~/.appstoreconnect/private_keys/
+            xcrun altool --validate-app -f "$RUNNER_TEMP"/export/*.ipa -t ios               --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" --output-format normal || true
+          fi
           rm -f "$KEY"
 
       - uses: actions/upload-artifact@v4
