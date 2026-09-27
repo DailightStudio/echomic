@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'ads.dart';
 import 'audio_engine.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -356,6 +357,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
+            const AdBanner(),
           ],
         ),
       ),
