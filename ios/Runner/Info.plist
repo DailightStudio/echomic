@@ -28,6 +28,15 @@
 	<string>노래하는 목소리를 마이크로 받아 에코를 입혀 실시간으로 들려주기 위해 마이크를 사용합니다.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>에코마이크는 카메라를 사용하지 않습니다. 마이크 소리를 받는 기능이 카메라와 같은 시스템 모듈을 써서 이 항목이 필요합니다.</string>
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-3035772295627652~3333028275</string>
+	<key>SKAdNetworkItems</key>
+	<array>
+		<dict>
+			<key>SKAdNetworkIdentifier</key>
+			<string>cstr6suwn9.skadnetwork</string>
+		</dict>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
