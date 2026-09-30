@@ -9,6 +9,11 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'ads.dart';
 import 'audio_engine.dart';
 
+// Karaoke preset — also the fresh-install default, so the first Start already sounds like one.
+const double _kPresetDelayMs = 120.0;
+const double _kPresetFeedback = 0.35;
+const double _kPresetReverb = 0.25;
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -24,19 +29,20 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _busy = false;
   String _status = 'Idle';
 
-  bool _boostEnabled = true;
+  bool _boostEnabled = false;
   double _gain = 2.0;
-  double _echoDelayMs = 0.0;
-  double _echoFeedback = 0.0;
-  double _reverbMix = 0.0;
+  double _echoDelayMs = _kPresetDelayMs;
+  double _echoFeedback = _kPresetFeedback;
+  double _reverbMix = _kPresetReverb;
   double _masterVolume = 0.8;
   double _gateThresholdDb = -40.0;
   final List<double> _eqGains = [-4.0, -2.0, 0.0, -4.0, 2.0]; // dB per band
-  bool _freqShiftEnabled = true;
+  bool _freqShiftEnabled = false;
   double _rmsLevel = 0.0; // 0.0~1.0 선형
   StreamSubscription? _eventSub;
 
   DateTime? _lastParamSend;
+  Timer? _pendingSend;
 
   @override
   void initState() {
@@ -54,9 +60,10 @@ class _HomeScreenState extends State<HomeScreen> {
           } else if (type == 'state') {
             final running = event['running'] as bool? ?? false;
             if (!running && _running) {
+              WakelockPlus.disable();
               setState(() {
                 _running = false;
-                _status = '오디오 장치 연결 끊김';
+                _status = '정지됨 (이어폰·통화 등 오디오 변경)';
               });
             }
           }
@@ -75,24 +82,25 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _eventSub?.cancel();
+    _pendingSend?.cancel();
     super.dispose();
   }
 
   Future<void> _loadPrefs() async {
     final p = await SharedPreferences.getInstance();
     setState(() {
-      _boostEnabled = p.getBool('boost') ?? true;
+      _boostEnabled = p.getBool('boost') ?? false;
       _gain = p.getDouble('gain') ?? 2.0;
-      _echoDelayMs = p.getDouble('echoDelayMs') ?? 0.0;
-      _echoFeedback = p.getDouble('echoFeedback') ?? 0.0;
-      _reverbMix = p.getDouble('reverbMix') ?? 0.0;
+      _echoDelayMs = p.getDouble('echoDelayMs') ?? _kPresetDelayMs;
+      _echoFeedback = p.getDouble('echoFeedback') ?? _kPresetFeedback;
+      _reverbMix = p.getDouble('reverbMix') ?? _kPresetReverb;
       _masterVolume = p.getDouble('masterVolume') ?? 0.8;
       _gateThresholdDb = p.getDouble('gateThresholdDb') ?? -40.0;
       const eqDefaults = [-4.0, -2.0, 0.0, -4.0, 2.0];
       for (int i = 0; i < 5; i++) {
         _eqGains[i] = p.getDouble('eq$i') ?? eqDefaults[i];
       }
-      _freqShiftEnabled = p.getBool('freqShift') ?? true;
+      _freqShiftEnabled = p.getBool('freqShift') ?? false;
     });
   }
 
@@ -114,9 +122,9 @@ class _HomeScreenState extends State<HomeScreen> {
   // One-tap karaoke-room sound: short slapback echo with a few repeats + some reverb.
   void _applyKaraokePreset() {
     setState(() {
-      _echoDelayMs = 120.0;
-      _echoFeedback = 0.35;
-      _reverbMix = 0.25;
+      _echoDelayMs = _kPresetDelayMs;
+      _echoFeedback = _kPresetFeedback;
+      _reverbMix = _kPresetReverb;
     });
     _engine.setEchoDelay(_echoDelayMs);
     _engine.setEchoFeedback(_echoFeedback);
@@ -124,12 +132,20 @@ class _HomeScreenState extends State<HomeScreen> {
     _savePrefs();
   }
 
+  // Throttled, but the LAST value always goes out (trailing send), so the native
+  // value ends equal to what the slider shows.
   void _sendParam(VoidCallback send) {
+    const window = Duration(milliseconds: 50);
     final now = DateTime.now();
-    if (_lastParamSend == null ||
-        now.difference(_lastParamSend!) > const Duration(milliseconds: 50)) {
+    _pendingSend?.cancel();
+    if (_lastParamSend == null || now.difference(_lastParamSend!) > window) {
       _lastParamSend = now;
       send();
+    } else {
+      _pendingSend = Timer(window, () {
+        _lastParamSend = DateTime.now();
+        send();
+      });
     }
   }
 
@@ -152,6 +168,14 @@ class _HomeScreenState extends State<HomeScreen> {
         final PermissionStatus mic = await Permission.microphone.request();
         if (!mic.isGranted) {
           setState(() => _status = '마이크 권한이 필요합니다');
+          if (mic.isPermanentlyDenied && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('설정에서 마이크 권한을 허용해 주세요'),
+                action: SnackBarAction(label: '설정 열기', onPressed: openAppSettings),
+              ),
+            );
+          }
           return;
         }
 
@@ -366,6 +390,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
             const AdBanner(),
           ],
         ),
