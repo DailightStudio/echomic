@@ -20,6 +20,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final AudioEngine _engine = AudioEngine.instance;
 
   bool _running = false;
+  DateTime? _sessionStart;
   bool _busy = false;
   String _status = 'Idle';
 
@@ -40,6 +41,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    StopInterstitial.preload();
     _loadPrefs();
     try {
       _eventSub = _engine.audioEvents.listen(
@@ -142,6 +144,10 @@ class _HomeScreenState extends State<HomeScreen> {
           _running = false;
           _status = '정지됨';
         });
+        final started = _sessionStart;
+        if (started != null) {
+          StopInterstitial.maybeShow(DateTime.now().difference(started));
+        }
       } else {
         final PermissionStatus mic = await Permission.microphone.request();
         if (!mic.isGranted) {
@@ -173,7 +179,10 @@ class _HomeScreenState extends State<HomeScreen> {
         await _engine.setFrequencyShift(_freqShiftEnabled);
 
         final bool ok = await _engine.start();
-        if (ok) WakelockPlus.enable();
+        if (ok) {
+          WakelockPlus.enable();
+          _sessionStart = DateTime.now();
+        }
         setState(() {
           _running = ok;
           _status = ok ? '실행 중 (저지연)' : '엔진 시작 실패';

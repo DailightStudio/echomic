@@ -13,13 +13,21 @@ class Ads {
   // AdMob account pub-3035772295627652, apps "에코마이크 Android/iOS".
   static const _bannerAndroid = 'ca-app-pub-3035772295627652/2012207743';
   static const _bannerIos = 'ca-app-pub-3035772295627652/1888170381';
+  static const _interstitialAndroid = 'INTERSTITIAL_ANDROID_PENDING';
+  static const _interstitialIos = 'INTERSTITIAL_IOS_PENDING';
   // Google's public test units — debug builds must never request live ads.
   static const _testBannerAndroid = 'ca-app-pub-3940256099942544/9214589741';
   static const _testBannerIos = 'ca-app-pub-3940256099942544/2435281174';
+  static const _testInterstitialAndroid = 'ca-app-pub-3940256099942544/1033173712';
+  static const _testInterstitialIos = 'ca-app-pub-3940256099942544/4411468910';
 
-  static String get bannerUnitId => kReleaseMode
-      ? (Platform.isIOS ? _bannerIos : _bannerAndroid)
-      : (Platform.isIOS ? _testBannerIos : _testBannerAndroid);
+  static String _pick(String ios, String android, String testIos, String testAndroid) =>
+      kReleaseMode ? (Platform.isIOS ? ios : android) : (Platform.isIOS ? testIos : testAndroid);
+
+  static String get bannerUnitId =>
+      _pick(_bannerIos, _bannerAndroid, _testBannerIos, _testBannerAndroid);
+  static String get interstitialUnitId => _pick(
+      _interstitialIos, _interstitialAndroid, _testInterstitialIos, _testInterstitialAndroid);
 
   /// iOS never shows the ATT prompt, so ads are requested non-personalized
   /// there (no tracking to declare in the App Store privacy label).
@@ -107,5 +115,65 @@ class _AdBannerState extends State<AdBanner> {
       height: ad.size.height.toDouble(),
       child: AdWidget(ad: ad),
     );
+  }
+}
+
+/// Full-screen ad at a natural break: right after the user stops singing.
+/// Never mid-session. Only after a real session and at most once per [_minGap],
+/// so a quick start/stop to tweak settings does not trigger it.
+class StopInterstitial {
+  StopInterstitial._();
+
+  static const _minSession = Duration(seconds: 60);
+  static const _minGap = Duration(minutes: 3);
+
+  static InterstitialAd? _ad;
+  static bool _loading = false;
+  static DateTime? _lastShown;
+
+  static Future<void> preload() async {
+    if (_ad != null || _loading) return;
+    await Ads.init();
+    if (!await ConsentInformation.instance.canRequestAds()) return;
+    _loading = true;
+    await InterstitialAd.load(
+      adUnitId: Ads.interstitialUnitId,
+      request: Ads.request,
+      adLoadCallback: InterstitialAdLoadCallback(
+        onAdLoaded: (ad) {
+          _loading = false;
+          _ad = ad;
+        },
+        onAdFailedToLoad: (err) {
+          _loading = false;
+          debugPrint('interstitial failed: $err');
+        },
+      ),
+    );
+  }
+
+  /// Call after the audio engine has stopped.
+  static void maybeShow(Duration session) {
+    final ad = _ad;
+    final last = _lastShown;
+    if (ad == null ||
+        session < _minSession ||
+        (last != null && DateTime.now().difference(last) < _minGap)) {
+      if (ad == null) preload();
+      return;
+    }
+    _ad = null;
+    ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (ad) {
+        ad.dispose();
+        preload();
+      },
+      onAdFailedToShowFullScreenContent: (ad, err) {
+        ad.dispose();
+        preload();
+      },
+    );
+    _lastShown = DateTime.now();
+    ad.show();
   }
 }
