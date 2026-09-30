@@ -12,6 +12,10 @@ import Foundation
 final class EchoEffect {
 
     static let maxDelayMs: Float = 500.0
+    // Below this, the delay line is too short to be heard as a discrete
+    // echo -- with feedback > 0 it instead behaves as a 1-sample comb
+    // filter (metallic/phasey artifact). Force echo off in that range.
+    static let minEchoMs: Float = 20.0
 
     private var buffer: [Float] = []
     private var sampleRate: Float = 48_000
@@ -23,6 +27,10 @@ final class EchoEffect {
     // thread. They are plain scalars, written atomically enough for audio use.
     private var delayFrames: Int = 1
     private var feedback: Float = 0.3
+    // True while the requested delay is below minEchoMs -- the delay line
+    // keeps running (so re-enabling doesn't pop in with stale history) but
+    // the audible output is forced dry.
+    private var belowMinDelay: Bool = true
 
     /// Allocate the delay line. Call before installing the tap (not on the
     /// audio thread).
@@ -41,6 +49,7 @@ final class EchoEffect {
 
     func setDelayMs(_ delayMs: Float) {
         let clamped = min(max(delayMs, 0), EchoEffect.maxDelayMs)
+        belowMinDelay = clamped < EchoEffect.minEchoMs
         var frames = Int((clamped / 1000.0) * sampleRate)
         if frames < 1 { frames = 1 }
         if maxFrames > 0 && frames >= maxFrames { frames = maxFrames - 1 }
@@ -57,6 +66,9 @@ final class EchoEffect {
         let channels = channelCount
         let delay = delayFrames
         let fb = feedback
+        // Delay line keeps running even while bypassed, so a later delay
+        // increase resumes from a live feedback tail instead of dead silence.
+        let bypass = belowMinDelay
 
         for frame in 0..<frameCount {
             var readIndex = writeIndex - delay
@@ -71,7 +83,7 @@ final class EchoEffect {
                 let delayed = buffer[readBase + ch]
                 let wet = dry + delayed * fb
                 buffer[writeBase + ch] = wet
-                samples[idx] = wet
+                samples[idx] = bypass ? dry : wet
             }
 
             writeIndex += 1

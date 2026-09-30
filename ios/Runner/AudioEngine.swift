@@ -1,8 +1,10 @@
 import AVFoundation
+import AudioToolbox
 
 enum AudioEngineError: LocalizedError {
-    /// Mic permission has never been requested — caller must call
-    /// AVCaptureDevice.requestAccess(for: .audio) and retry start().
+    /// Mic permission has never been requested -- caller must call
+    /// AVAudioSession.sharedInstance().requestRecordPermission(_:) and
+    /// retry start().
     case microphoneAccessNotRequested
     case microphoneAccessDenied
 
@@ -16,20 +18,146 @@ enum AudioEngineError: LocalizedError {
     }
 }
 
+/// Lock-free single-producer/single-consumer ring buffer for interleaved
+/// Float audio.
+///
+/// The producer (mic input render callback) and consumer (output render
+/// callback) can run on different real-time threads -- e.g. the built-in mic
+/// and a Bluetooth A2DP speaker do not share a hardware clock -- so no locks
+/// are used. `writeFrame` is only ever written by the producer and
+/// `readFrame` only by the consumer, with one deliberate exception (the
+/// overflow-drop in `writePlanar`, documented below). Plain `Int`
+/// loads/stores are used instead of an atomic type: on arm64 an aligned
+/// word-sized load/store cannot tear, and any momentary staleness in the
+/// other side's cursor only shifts the buffer's apparent fill by a few
+/// samples for one render cycle, self-correcting on the next.
+final class SPSCRingBuffer {
+    private let channelCount: Int
+    private let framesCapacity: Int   // power of two
+    private let indexMask: Int
+    private let storage: UnsafeMutablePointer<Float>
+
+    private var writeFrame: Int = 0   // producer-owned
+    private var readFrame: Int = 0    // consumer-owned (see writePlanar note)
+
+    /// Samples above this fill (in frames) are dropped from the tail on the
+    /// next write, bounding the latency a backlog can add (e.g. right after
+    /// a route change stalls the consumer for a few cycles).
+    var maxFillFrames: Int
+
+    init(channelCount: Int, framesCapacity: Int, maxFillFrames: Int) {
+        precondition(framesCapacity > 0 && (framesCapacity & (framesCapacity - 1)) == 0,
+                     "framesCapacity must be a power of two")
+        self.channelCount = max(1, channelCount)
+        self.framesCapacity = framesCapacity
+        self.indexMask = framesCapacity - 1
+        self.maxFillFrames = min(max(maxFillFrames, 1), framesCapacity - 1)
+        let sampleCapacity = framesCapacity * self.channelCount
+        storage = .allocate(capacity: sampleCapacity)
+        storage.initialize(repeating: 0, count: sampleCapacity)
+    }
+
+    deinit {
+        storage.deallocate()
+    }
+
+    /// Producer: interleave `frameCount` frames from a non-interleaved
+    /// (planar) source buffer list into the ring.
+    func writePlanar(_ bufferList: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
+        guard frameCount > 0 else { return }
+        let nch = min(channelCount, bufferList.count)
+        guard nch > 0 else { return }
+
+        // Bound the backlog: drop the oldest unread samples up front so
+        // added latency stays capped even after a burst (e.g. a route
+        // change stalls the consumer for a cycle or two). readFrame is
+        // consumer-owned in the steady state; this is the one place the
+        // producer also advances it, and only ever forward -- the worst
+        // case from racing the consumer's own advance is a stale fill
+        // estimate for one cycle, never a crash or desync (indices are
+        // always masked before use).
+        let used = writeFrame - readFrame
+        let newUsed = used + frameCount
+        if newUsed > maxFillFrames {
+            readFrame += (newUsed - maxFillFrames)
+        }
+
+        for f in 0..<frameCount {
+            let dstFrame = (writeFrame + f) & indexMask
+            let base = dstFrame * channelCount
+            for ch in 0..<channelCount {
+                let srcCh = ch < nch ? ch : nch - 1
+                guard let raw = bufferList[srcCh].mData else { continue }
+                let srcPtr = raw.assumingMemoryBound(to: Float.self)
+                storage[base + ch] = srcPtr[f]
+            }
+        }
+        writeFrame += frameCount
+    }
+
+    /// Consumer: pull up to `frameCount` interleaved frames into `dst`
+    /// (capacity >= frameCount*channelCount). Zero-fills the shortfall on
+    /// underrun instead of leaving stale data.
+    func readInterleaved(into dst: UnsafeMutablePointer<Float>, frameCount: Int) {
+        let available = max(0, writeFrame - readFrame)
+        let toRead = max(0, min(available, frameCount))
+
+        for f in 0..<toRead {
+            let srcFrame = (readFrame + f) & indexMask
+            let base = srcFrame * channelCount
+            let dstBase = f * channelCount
+            for ch in 0..<channelCount {
+                dst[dstBase + ch] = storage[base + ch]
+            }
+        }
+        if toRead < frameCount {
+            for i in (toRead * channelCount)..<(frameCount * channelCount) {
+                dst[i] = 0
+            }
+        }
+        readFrame += toRead
+    }
+}
+
 /// Low-latency full-duplex engine on top of AVAudioEngine.
 ///
-/// Routing: AVCaptureSession mic -> (echo applied in capture callback) ->
-/// playerNode -> mainMixer -> output. We capture the mic via AVCaptureSession
-/// (so the AVAudioSession category can stay `.playback` and route to A2DP BT
-/// speakers), run gain + echo on the captured PCM, and immediately schedule the
-/// processed buffer on an AVAudioPlayerNode so it reaches the speaker with
-/// minimal added latency.
+/// Routing: engine.inputNode -> AVAudioSinkNode (captures into a
+/// preallocated lock-free ring buffer) ... AVAudioSourceNode (reads the
+/// ring, runs the DSP chain) -> AVAudioUnitEQ -> AVAudioUnitReverb ->
+/// AVAudioUnitEffect (system peak limiter) -> mainMixer -> output.
+///
+/// The session stays in `.playAndRecord` (not voice-chat/voice-processing)
+/// with `.mixWithOthers` so the other app's MR track keeps playing, and
+/// `.allowBluetoothA2DP` + `.defaultToSpeaker` for BT speaker / speakerphone
+/// output. Sink/source nodes are Apple's standard low-latency producer /
+/// consumer primitives for exactly this "process my own mic in real time"
+/// use case (as opposed to routing the mic through a player node, which
+/// forces at least one extra IO buffer of latency and a stale-backlog risk
+/// after route changes).
 final class AudioEngine: NSObject {
 
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
+    private var engine = AVAudioEngine()
     private let reverb = AVAudioUnitReverb()
     private let eq = AVAudioUnitEQ(numberOfBands: 5)
+    // Output limiter: the LAST stage that can clip. EQ boosts and the reverb's
+    // wet tail can both push samples over 0 dBFS, so the limiter must run
+    // after both -- not between the DSP chain and EQ, which is where the old
+    // per-sample limiter ran. AVAudioUnitEQ/AVAudioUnitReverb are opaque
+    // AudioUnits wired directly into the AVAudioEngine graph (not something
+    // our own AVAudioSourceNode render block can intercept), so the
+    // straightforward way to put a limiter after them is another AudioUnit in
+    // the same graph: Apple's built-in Peak Limiter effect
+    // (kAudioUnitSubType_PeakLimiter), wrapped as an AVAudioUnitEffect and
+    // connected as reverb -> limiter -> mainMixer.
+    private let limiter: AVAudioUnitEffect = {
+        let desc = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: kAudioUnitSubType_PeakLimiter,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0)
+        return AVAudioUnitEffect(audioComponentDescription: desc)
+    }()
     private let echo = EchoEffect()
     private let comp = Compressor()
     private let suppressor = FeedbackSuppressor()
@@ -37,34 +165,38 @@ final class AudioEngine: NSObject {
     private let hpf  = HighPassFilter()
     private let gate = NoiseGate()
 
+    // eq/reverb/limiter are attached once per `engine` instance and never
+    // detached (only disconnected) across stop()/start() cycles, to avoid the
+    // "detach of unattached node" NSException on a partial-start failure
+    // path. A fresh `engine` (media services reset) needs them re-attached.
+    private var persistentNodesAttached = false
+
+    private var sinkNode: AVAudioSinkNode?
+    private var sourceNode: AVAudioSourceNode?
+    private var ringBuffer: SPSCRingBuffer?
+
+    private static let ringFrameCapacity = 8192   // power of two
+    private static let dspScratchCapacity = 8192  // frames
+
+    private var dspScratch: UnsafeMutablePointer<Float>?
+    private var dspScratchCapacityFrames: Int = 0
+    private var channelCount: Int = 1
+
     private var gain: Float = 1.0
-    // false = no amplification: input gain pinned to 1.0 and compressor makeup off.
+    // false = no amplification: input gain pinned to 1.0 and the compressor
+    // is bypassed entirely (not called at all -- no makeup, no 4:1 ratio).
     private var boostEnabled = true
     private(set) var isRunning = false
 
     private var processingFormat: AVAudioFormat?
 
     private var isReconfiguring = false
+    // Set when the engine was torn down automatically (interruption/route
+    // change) rather than by an explicit stop() call, so the matching
+    // "resume" notification knows whether it is allowed to restart.
+    private var autoStoppedPendingResume = false
 
     private var observers: [NSObjectProtocol] = []
-
-    // AVCaptureSession — mic capture without overriding .playback category
-    private var captureSession: AVCaptureSession?
-    private let captureQueue = DispatchQueue(label: "echomic.capture", qos: .userInteractive)
-    private var audioConverter: AVAudioConverter?
-
-    // Realtime buffer pool: avoid heap allocation on the audio callback.
-    private var outputBufferPool: [AVAudioPCMBuffer] = []
-    // Free-list for the output pool. Only ever touched on captureQueue
-    // (the free-list search in handle() + the scheduleBuffer completion).
-    private var bufferFree: [Bool] = []
-    private var interleavedScratch: [Float] = []
-    // Generation counter guarding the buffer pool across stop()/start() cycles.
-    // Only ever read/written on captureQueue (handle(), scheduleBuffer
-    // completions, and the sync block in stop()), so no extra locking needed.
-    // Stale completions from a previous run see a mismatched generation and
-    // must not touch the (re-allocated) bufferFree array.
-    private var generation: Int = 0
 
     // Cached echo params so they survive a prepare()/restart.
     private var lastDelayMs: Float = 150.0
@@ -77,18 +209,6 @@ final class AudioEngine: NSObject {
     private var masterVolume: Float = 1.0
 
     private(set) var currentRMSLevel: Float = 0.0
-
-    // MARK: - Init
-
-    override init() {
-        super.init()
-        // Attach nodes exactly once for the engine's lifetime. stop() never
-        // detaches them, so a stop() reached via a partial start() failure can
-        // never hit the "detach of unattached node" NSException.
-        engine.attach(player)
-        engine.attach(eq)
-        engine.attach(reverb)
-    }
 
     // MARK: - Parameters
 
@@ -121,23 +241,29 @@ final class AudioEngine: NSObject {
     func start() -> Bool {
         if isRunning { return true }
         do {
+            try checkMicPermission()
             try configureSession()
+            attachPersistentNodesIfNeeded()
 
-            // .playback disables AVAudioEngine's inputNode, so derive the
-            // processing format from the session sample rate and capture the mic
-            // via AVCaptureSession instead.
-            let sampleRate = AVAudioSession.sharedInstance().sampleRate > 0
-                ? AVAudioSession.sharedInstance().sampleRate : 48_000
+            // .playAndRecord enables both the real inputNode and A2DP/speaker
+            // output, so the processing format is derived straight from the
+            // negotiated hardware input format -- no separate capture session
+            // needed.
+            let inputFormat = engine.inputNode.outputFormat(forBus: 0)
+            let sampleRate = inputFormat.sampleRate > 0 ? inputFormat.sampleRate : 48_000
+            let channels = max(1, Int(inputFormat.channelCount))
+            channelCount = channels
+
             guard let format = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
                 sampleRate: sampleRate,
-                channels: 1,
+                channels: AVAudioChannelCount(channels),
                 interleaved: false
             ) else { return false }
             processingFormat = format
 
             echo.prepare(sampleRate: Float(format.sampleRate),
-                         channelCount: Int(format.channelCount))
+                         channelCount: channels)
             echo.reset()
             echo.setDelayMs(lastDelayMs)
             echo.setFeedback(lastFeedback)
@@ -146,13 +272,11 @@ final class AudioEngine: NSObject {
             comp.reset()
 
             suppressor.prepare(sampleRate: Float(format.sampleRate),
-                               channelCount: Int(format.channelCount))
+                               channelCount: channels)
             freqShifter.prepare(sampleRate: Float(format.sampleRate))
 
             hpf.prepare(sampleRate: Float(format.sampleRate))
             gate.prepare(sampleRate: Float(format.sampleRate))
-
-            // player/eq/reverb are attached once in init().
 
             // Configure 5 EQ bands
             let eqConfig: [(Float, AVAudioUnitEQFilterType, Float)] = [
@@ -172,31 +296,57 @@ final class AudioEngine: NSObject {
 
             reverb.loadFactoryPreset(.largeHall)
             reverb.wetDryMix = lastReverbMix * 100  // restore cached mix
-            engine.connect(player, to: eq, format: format)
-            engine.connect(eq, to: reverb, format: format)
-            engine.connect(reverb, to: engine.mainMixerNode, format: format)
 
-            // Pre-allocate the realtime output buffer pool + scratch so the audio
-            // callback never touches the heap.
-            let maxFrames = 8192
-            let poolSize = 8
-            outputBufferPool = (0..<poolSize).compactMap {
-                _ in AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(maxFrames))
+            // Pre-allocate the realtime ring buffer + DSP scratch so neither
+            // audio callback ever touches the heap.
+            let ring = SPSCRingBuffer(channelCount: channels,
+                                      framesCapacity: AudioEngine.ringFrameCapacity,
+                                      maxFillFrames: AudioEngine.ringFrameCapacity / 2)
+            ringBuffer = ring
+
+            let scratch = UnsafeMutablePointer<Float>.allocate(
+                capacity: AudioEngine.dspScratchCapacity * channels)
+            scratch.initialize(repeating: 0, count: AudioEngine.dspScratchCapacity * channels)
+            dspScratch = scratch
+            dspScratchCapacityFrames = AudioEngine.dspScratchCapacity
+
+            let sink = AVAudioSinkNode { [weak self] _, frameCount, audioBufferList in
+                guard let self = self, let ring = self.ringBuffer else { return noErr }
+                let abl = UnsafeMutableAudioBufferListPointer(
+                    UnsafeMutablePointer(mutating: audioBufferList))
+                ring.writePlanar(abl, frameCount: Int(frameCount))
+                return noErr
             }
-            bufferFree = [Bool](repeating: true, count: poolSize)
-            interleavedScratch = [Float](repeating: 0, count: maxFrames * Int(format.channelCount))
+            engine.attach(sink)
+            engine.connect(engine.inputNode, to: sink, format: inputFormat)
+            sinkNode = sink
+
+            let source = AVAudioSourceNode(format: format) { [weak self] isSilence, _, frameCount, audioBufferList in
+                isSilence.pointee = false
+                return self?.renderSource(frameCount: frameCount, audioBufferList: audioBufferList) ?? noErr
+            }
+            engine.attach(source)
+            sourceNode = source
+
+            engine.connect(source, to: eq, format: format)
+            engine.connect(eq, to: reverb, format: format)
+            engine.connect(reverb, to: limiter, format: format)
+            engine.connect(limiter, to: engine.mainMixerNode, format: format)
 
             engine.prepare()
             try engine.start()
-            player.play()
 
-            // Capture session must start AFTER engine.start()+player.play() so the
-            // player is already running when the first captured buffer arrives.
-            try setupCaptureSession(processingFormat: format)
+            // Bound the ring to ~2 *actual* IO buffers (the preferred 5 ms
+            // duration is only a request; Bluetooth routes in particular
+            // often force a larger one).
+            let session = AVAudioSession.sharedInstance()
+            let ioFrames = Int((session.ioBufferDuration * session.sampleRate).rounded())
+            ring.maxFillFrames = min(max(ioFrames, 64) * 2, AudioEngine.ringFrameCapacity - 1)
 
             registerSessionObservers()
 
             isRunning = true
+            autoStoppedPendingResume = false
             return true
         } catch {
             NSLog("echomic: failed to start engine: \(error)")
@@ -206,84 +356,102 @@ final class AudioEngine: NSObject {
     }
 
     func stop() {
-        removeSessionObservers()
+        internalStop(keepObservers: false)
+        autoStoppedPendingResume = false
+    }
 
-        captureSession?.stopRunning()
-        // Wait for any in-flight captureOutput callback AND invalidate the
-        // current generation: scheduleBuffer completions that land on
-        // captureQueue after this point (e.g. fired by player.stop() below)
-        // see a stale generation and leave bufferFree alone.
-        captureQueue.sync { generation += 1 }
-        captureSession = nil
-        audioConverter = nil
-        if player.isPlaying { player.stop() }
-        if engine.isRunning { engine.stop() }
-        // Nodes stay attached for the engine's lifetime (attached in init());
-        // only drop the connections so start() can reconnect with a new format.
-        // Detaching here would NSException-crash when stop() runs on a partial
-        // start() failure path.
+    // MARK: - Internals
+
+    private func attachPersistentNodesIfNeeded() {
+        guard !persistentNodesAttached else { return }
+        engine.attach(eq)
+        engine.attach(reverb)
+        engine.attach(limiter)
+        persistentNodesAttached = true
+    }
+
+    /// Tears down the engine graph and deactivates the session. When
+    /// `keepObservers` is true (interruption/route-change-driven teardown),
+    /// the session lifecycle observers are left registered so the matching
+    /// "resume" notification can restart us later.
+    private func internalStop(keepObservers: Bool) {
+        if !keepObservers {
+            removeSessionObservers()
+        }
+
+        if let s = sinkNode {
+            engine.disconnectNodeInput(s)
+            engine.detach(s)
+            sinkNode = nil
+        }
+        if let s = sourceNode {
+            engine.disconnectNodeOutput(s)
+            engine.detach(s)
+            sourceNode = nil
+        }
+        // eq/reverb/limiter stay attached for this `engine` instance's
+        // lifetime; only drop connections so start() can reconnect with a
+        // new format. Detaching here would NSException-crash when stop()
+        // runs on a partial start() failure path.
+        engine.disconnectNodeOutput(limiter)
         engine.disconnectNodeOutput(reverb)
         engine.disconnectNodeOutput(eq)
-        engine.disconnectNodeOutput(player)
+
+        if engine.isRunning { engine.stop() }
+
+        ringBuffer = nil
+        dspScratch?.deallocate()
+        dspScratch = nil
+        dspScratchCapacityFrames = 0
+
         try? AVAudioSession.sharedInstance().setActive(
             false, options: [.notifyOthersOnDeactivation])
         isRunning = false
         processingFormat = nil
     }
 
-    // MARK: - Internals
+    /// Drops all local bookkeeping without touching `engine` -- used only
+    /// after mediaServicesWereReset, where the existing engine/session
+    /// objects are already invalid and must not be called into.
+    private func resetLocalState() {
+        sinkNode = nil
+        sourceNode = nil
+        ringBuffer = nil
+        dspScratch?.deallocate()
+        dspScratch = nil
+        dspScratchCapacityFrames = 0
+        isRunning = false
+        processingFormat = nil
+    }
+
+    private func checkMicPermission() throws {
+        // AVAudioApplication.shared.recordPermission (iOS 17+) supersedes
+        // this, but its exact member names could not be verified against an
+        // SDK on this machine; AVAudioSession.recordPermission is the
+        // long-standing, guaranteed-available API (iOS 8+) and is only
+        // deprecated, not removed, on iOS 17 -- a compile-clean choice at
+        // the cost of one deprecation warning on newer SDKs.
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return
+        case .undetermined: throw AudioEngineError.microphoneAccessNotRequested
+        case .denied: throw AudioEngineError.microphoneAccessDenied
+        @unknown default: throw AudioEngineError.microphoneAccessDenied
+        }
+    }
 
     private func configureSession() throws {
         let session = AVAudioSession.sharedInstance()
-        // .playback enables A2DP BT output; mic is captured via AVCaptureSession instead.
-        // .mixWithOthers keeps other apps' audio (MR from YouTube/Melon) playing
-        // under the mic instead of being stopped when we activate.
-        try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        // .playAndRecord (not voiceChat/voice-processing) + .mixWithOthers
+        // keeps the other app's MR track playing under the mic instead of
+        // being stopped when we activate. .allowBluetoothA2DP routes output
+        // to a BT speaker (mic then falls back to the built-in mic -- A2DP
+        // has no input path). .defaultToSpeaker keeps speakerphone use at
+        // normal (not earpiece-quiet) volume when no accessory is attached.
+        try session.setCategory(.playAndRecord, mode: .default,
+                                options: [.mixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker])
         try session.setPreferredIOBufferDuration(0.005)
         try session.setPreferredSampleRate(48_000)
         try session.setActive(true)
-    }
-
-    private func setupCaptureSession(processingFormat: AVAudioFormat) throws {
-        // Fail fast (and cleanly) if mic permission is missing instead of
-        // letting startRunning() spin up a session that never delivers audio.
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            break
-        case .notDetermined:
-            // Distinct error so the caller can requestAccess and retry start()
-            // rather than treating a never-asked state as a hard denial.
-            throw AudioEngineError.microphoneAccessNotRequested
-        case .denied, .restricted:
-            throw AudioEngineError.microphoneAccessDenied
-        @unknown default:
-            throw AudioEngineError.microphoneAccessDenied
-        }
-
-        let cs = AVCaptureSession()
-        cs.automaticallyConfiguresApplicationAudioSession = false
-
-        guard let mic = AVCaptureDevice.default(for: .audio) else {
-            throw NSError(domain: "echomic", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "No mic found"])
-        }
-        let micInput = try AVCaptureDeviceInput(device: mic)
-        guard cs.canAddInput(micInput) else {
-            throw NSError(domain: "echomic", code: -2,
-                          userInfo: [NSLocalizedDescriptionKey: "Cannot add mic input"])
-        }
-        cs.addInput(micInput)
-
-        let audioOut = AVCaptureAudioDataOutput()
-        audioOut.setSampleBufferDelegate(self, queue: captureQueue)
-        guard cs.canAddOutput(audioOut) else {
-            throw NSError(domain: "echomic", code: -3,
-                          userInfo: [NSLocalizedDescriptionKey: "Cannot add audio output"])
-        }
-        cs.addOutput(audioOut)
-
-        captureSession = cs
-        cs.startRunning()
     }
 
     // MARK: - Session recovery
@@ -305,28 +473,25 @@ final class AudioEngine: NSObject {
 
             switch type {
             case .began:
-                // iOS stops the engine for us; nothing to do.
-                break
+                // Do NOT rely on iOS to have already stopped the engine for
+                // us: isRunning must flip to false right away so the
+                // plugin's level/state poll reports it (otherwise the UI
+                // keeps showing "running" while the engine is dead).
+                guard self.isRunning else { return }
+                self.autoStoppedPendingResume = true
+                DispatchQueue.main.async {
+                    self.internalStop(keepObservers: true)
+                }
             case .ended:
-                if let rawOptions = info[AVAudioSessionInterruptionOptionKey] as? UInt {
-                    let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
-                    if options.contains(.shouldResume) {
-                        let newSR = AVAudioSession.sharedInstance().sampleRate
-                        if let fmt = self.processingFormat, abs(fmt.sampleRate - newSR) > 1.0 {
-                            // Sample rate changed during the interruption -- full
-                            // reconfigure. Defer off the session callback stack to
-                            // avoid re-entrant stop()/start() crashes.
-                            guard !self.isReconfiguring else { return }
-                            self.isReconfiguring = true
-                            DispatchQueue.main.async {
-                                self.stop()
-                                _ = self.start()
-                                self.isReconfiguring = false
-                            }
-                        } else {
-                            self.resumeEngine()
-                        }
-                    }
+                guard self.autoStoppedPendingResume,
+                      let rawOptions = info[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
+                let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
+                guard options.contains(.shouldResume), !self.isReconfiguring else { return }
+                self.isReconfiguring = true
+                self.autoStoppedPendingResume = false
+                DispatchQueue.main.async {
+                    _ = self.start()
+                    self.isReconfiguring = false
                 }
             @unknown default:
                 break
@@ -343,43 +508,78 @@ final class AudioEngine: NSObject {
                   let rawReason = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
                   let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason) else { return }
 
-            if reason == .oldDeviceUnavailable || reason == .newDeviceAvailable {
-                let newSampleRate = AVAudioSession.sharedInstance().sampleRate
-                if let fmt = self.processingFormat, abs(fmt.sampleRate - newSampleRate) > 1.0 {
-                    // Format changed -- full reconfigure. Defer off the session
-                    // callback stack to avoid re-entrant stop()/start() crashes.
-                    guard !self.isReconfiguring else { return }
+            switch reason {
+            case .oldDeviceUnavailable:
+                // Headphones unplugged (or similar): never fall through to
+                // the built-in speaker+mic combination while running --
+                // that is the textbook acoustic-feedback (howl) setup.
+                guard self.isRunning else { return }
+                self.autoStoppedPendingResume = true
+                DispatchQueue.main.async {
+                    self.internalStop(keepObservers: true)
+                }
+            case .newDeviceAvailable:
+                if self.isRunning {
+                    let newFormat = self.engine.inputNode.outputFormat(forBus: 0)
+                    guard let fmt = self.processingFormat, newFormat.sampleRate > 0,
+                          abs(fmt.sampleRate - newFormat.sampleRate) > 1.0
+                            || fmt.channelCount != newFormat.channelCount,
+                          !self.isReconfiguring else { return }
                     self.isReconfiguring = true
                     DispatchQueue.main.async {
-                        self.stop()
+                        self.internalStop(keepObservers: true)
                         _ = self.start()
                         self.isReconfiguring = false
                     }
-                } else {
-                    self.resumeEngine()
+                    return
                 }
+                guard self.autoStoppedPendingResume, !self.isReconfiguring else { return }
+                self.isReconfiguring = true
+                self.autoStoppedPendingResume = false
+                DispatchQueue.main.async {
+                    _ = self.start()
+                    self.isReconfiguring = false
+                }
+            default:
+                break
             }
         }
 
-        observers = [interruption, routeChange]
-
-        // captureSession is non-nil here: registerSessionObservers() runs after
-        // setupCaptureSession() succeeds.
-        let captureError = center.addObserver(
-            forName: .AVCaptureSessionRuntimeError,
-            object: captureSession,
+        let mediaReset = center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.isRunning else { return }
-            guard !self.isReconfiguring else { return }
+            guard let self = self, !self.isReconfiguring else { return }
+            self.isReconfiguring = true
+            let wasRunning = self.isRunning
+            // Every existing AVAudioEngine/session object is invalid once
+            // media services reset -- drop bookkeeping without touching the
+            // now-defunct engine, then build a fresh one.
+            self.resetLocalState()
+            self.engine = AVAudioEngine()
+            self.persistentNodesAttached = false
+            if wasRunning {
+                _ = self.start()
+            }
+            self.isReconfiguring = false
+        }
+
+        let configChange = center.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.isRunning, !self.isReconfiguring else { return }
             self.isReconfiguring = true
             DispatchQueue.main.async {
-                self.stop()
+                self.internalStop(keepObservers: true)
                 _ = self.start()
                 self.isReconfiguring = false
             }
         }
-        observers.append(captureError)
+
+        observers = [interruption, routeChange, mediaReset, configChange]
     }
 
     private func removeSessionObservers() {
@@ -389,185 +589,56 @@ final class AudioEngine: NSObject {
         observers.removeAll()
     }
 
-    private func resumeEngine() {
-        try? configureSession()
-        try? engine.start()
-        guard engine.isRunning else {
-            // Engine failed to restart -- calling player.play() now would raise
-            // an NSException and crash. Fall back to a full reconfigure instead.
-            NSLog("echomic: resumeEngine failed to restart engine, reconfiguring")
-            guard !isReconfiguring else { return }
-            isReconfiguring = true
-            DispatchQueue.main.async {
-                self.stop()
-                _ = self.start()
-                self.isReconfiguring = false
-            }
-            return
-        }
-        player.play()
-        if captureSession?.isRunning == false {
-            captureSession?.startRunning()
-        }
-    }
+    // MARK: - Realtime processing (hot path -- no allocations)
 
-    /// Runs gain + echo over the captured buffer and schedules it for playback.
-    private func handle(inputBuffer: AVAudioPCMBuffer, targetFormat: AVAudioFormat) {
-        guard !outputBufferPool.isEmpty else { return }
+    /// AVAudioSourceNode render callback: pulls from the ring buffer, runs
+    /// the DSP chain, and de-interleaves into the node's output buffer list.
+    private func renderSource(frameCount: AVAudioFrameCount,
+                              audioBufferList: UnsafeMutablePointer<AudioBufferList>) -> OSStatus {
+        let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
+        let count = Int(frameCount)
+        let channels = channelCount
 
-        // Find a free buffer; drop the frame if all are in flight.
-        var freeIdx = -1
-        for i in 0..<bufferFree.count where bufferFree[i] {
-            freeIdx = i
-            break
-        }
-        guard freeIdx >= 0 else { return }
-        bufferFree[freeIdx] = false
-        let outBuffer = outputBufferPool[freeIdx]
-
-        let frameCount = Int(inputBuffer.frameLength)
-        let channels   = Int(targetFormat.channelCount)
-        guard frameCount > 0,
-              frameCount <= Int(outBuffer.frameCapacity),
-              frameCount * channels <= interleavedScratch.count else {
-            bufferFree[freeIdx] = true   // return buffer to pool on early exit
-            return
-        }
-
-        outBuffer.frameLength = inputBuffer.frameLength
-
-        guard let src = inputBuffer.floatChannelData,
-              let dst = outBuffer.floatChannelData else {
-            bufferFree[freeIdx] = true
-            return
-        }
-
-        let inChCount = Int(inputBuffer.format.channelCount)
-
-        // Echo operates on interleaved data, so pack -> process -> unpack using
-        // the reusable scratch buffer (no heap allocation here).
-        if inChCount == channels {
-            for ch in 0..<channels {
-                let srcCh = src[ch]
-                for frame in 0..<frameCount {
-                    interleavedScratch[frame * channels + ch] = srcCh[frame]
+        guard let ring = ringBuffer, let scratch = dspScratch,
+              count > 0, count <= dspScratchCapacityFrames else {
+            // Defensive silence: never let stale/garbage data reach the
+            // speaker if a render call ever arrives larger than expected.
+            for buffer in abl {
+                if let raw = buffer.mData {
+                    memset(raw, 0, Int(buffer.mDataByteSize))
                 }
             }
-        } else if inChCount > channels {
-            // Input has more channels than output -- downmix (average).
-            for ch in 0..<channels {
-                for frame in 0..<frameCount {
-                    var sum: Float = 0
-                    for inCh in 0..<inChCount {
-                        sum += src[inCh][frame]
-                    }
-                    interleavedScratch[frame * channels + ch] = sum / Float(inChCount)
-                }
-            }
-        } else {
-            // Input has fewer channels than output -- replicate channel 0
-            // (e.g. mono mic feeding a stereo pipeline).
-            let srcCh = src[0]
-            for ch in 0..<channels {
-                for frame in 0..<frameCount {
-                    interleavedScratch[frame * channels + ch] = srcCh[frame]
-                }
-            }
+            return noErr
         }
 
-        interleavedScratch.withUnsafeMutableBufferPointer { ptr in
-            hpf.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
-            gate.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
-            comp.process(ptr.baseAddress!, frameCount: frameCount, channels: channels,
-                         applyMakeup: boostEnabled)
-            echo.process(ptr.baseAddress!, frameCount: frameCount,
-                         gain: boostEnabled ? gain : 1)
-            comp.limit(ptr.baseAddress!, count: frameCount * channels)
-            suppressor.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
-            freqShifter.process(ptr.baseAddress!, frameCount: frameCount, channels: channels)
-        }
+        ring.readInterleaved(into: scratch, frameCount: count)
 
-        // Apply master volume.
-        for i in 0..<(frameCount * channels) {
-            interleavedScratch[i] *= masterVolume
+        hpf.process(scratch, frameCount: count, channels: channels)
+        gate.process(scratch, frameCount: count, channels: channels)
+        if boostEnabled {
+            comp.process(scratch, frameCount: count, channels: channels, applyMakeup: true)
         }
+        echo.process(scratch, frameCount: count, gain: boostEnabled ? gain : 1)
+        suppressor.process(scratch, frameCount: count, channels: channels)
+        freqShifter.process(scratch, frameCount: count, channels: channels)
 
-        // RMS level (non-atomic, but adequate for UI polling).
+        // Master volume + RMS level (non-atomic, but adequate for UI polling).
+        let total = count * channels
+        let vol = masterVolume
         var sumSq: Float = 0
-        for i in 0..<(frameCount * channels) {
-            let s = interleavedScratch[i]
-            sumSq += s * s
+        for i in 0..<total {
+            scratch[i] *= vol
+            sumSq += scratch[i] * scratch[i]
         }
-        currentRMSLevel = sqrt(sumSq / Float(frameCount * channels))
+        currentRMSLevel = sqrt(sumSq / Float(total))
 
-        for ch in 0..<channels {
-            let dstCh = dst[ch]
-            for frame in 0..<frameCount {
-                dstCh[frame] = interleavedScratch[frame * channels + ch]
+        for ch in 0..<min(channels, abl.count) {
+            guard let raw = abl[ch].mData else { continue }
+            let dst = raw.assumingMemoryBound(to: Float.self)
+            for f in 0..<count {
+                dst[f] = scratch[f * channels + ch]
             }
         }
-
-        let idx = freeIdx
-        let gen = generation  // handle() runs on captureQueue
-        player.scheduleBuffer(outBuffer) { [weak self] in
-            self?.captureQueue.async {
-                guard let self = self, self.generation == gen else { return }
-                self.bufferFree[idx] = true
-            }
-        }
-    }
-}
-
-extension AudioEngine: AVCaptureAudioDataOutputSampleBufferDelegate {
-    func captureOutput(_ output: AVCaptureOutput,
-                       didOutput sampleBuffer: CMSampleBuffer,
-                       from connection: AVCaptureConnection) {
-        guard let fmt = processingFormat else { return }
-
-        guard let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-        // Non-failable in the current SDK (was optional in older ones).
-        let nativeFormat = AVAudioFormat(cmAudioFormatDescription: fmtDesc)
-
-        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
-        guard frameCount > 0 else { return }
-
-        // Allocate buffer matching the capture device's native format
-        guard let srcBuffer = AVAudioPCMBuffer(pcmFormat: nativeFormat,
-                                               frameCapacity: frameCount) else { return }
-        srcBuffer.frameLength = frameCount
-
-        let copyStatus = CMSampleBufferCopyPCMDataIntoAudioBufferList(
-            sampleBuffer, at: 0, frameCount: Int32(frameCount),
-            into: srcBuffer.mutableAudioBufferList)
-        guard copyStatus == noErr else { return }
-
-        if nativeFormat.isEqual(fmt) {
-            handle(inputBuffer: srcBuffer, targetFormat: fmt)
-            return
-        }
-
-        // Formats differ — use AVAudioConverter
-        if audioConverter == nil || !audioConverter!.inputFormat.isEqual(nativeFormat) {
-            audioConverter = AVAudioConverter(from: nativeFormat, to: fmt)
-        }
-        guard let converter = audioConverter else { return }
-
-        let ratio = fmt.sampleRate / nativeFormat.sampleRate
-        let outFrames = AVAudioFrameCount(Double(frameCount) * ratio + 1)
-        guard let dstBuffer = AVAudioPCMBuffer(pcmFormat: fmt,
-                                               frameCapacity: outFrames) else { return }
-
-        var consumed = false
-        var convError: NSError?
-        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-            if consumed { outStatus.pointee = .noDataNow; return nil }
-            consumed = true
-            outStatus.pointee = .haveData
-            return srcBuffer
-        }
-        converter.convert(to: dstBuffer, error: &convError, withInputFrom: inputBlock)
-        guard convError == nil else { return }
-
-        handle(inputBuffer: dstBuffer, targetFormat: fmt)
+        return noErr
     }
 }
