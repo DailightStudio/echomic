@@ -5,16 +5,17 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
-/// AdMob setup: consent (UMP) first, then SDK init. Banner only — full-screen
-/// formats would cut into the live mic/echo session.
+/// AdMob setup: consent (UMP) first, then SDK init. A banner while singing and
+/// one interstitial after Stop ([StopInterstitial]) — nothing full-screen ever
+/// interrupts a live mic/echo session.
 class Ads {
   Ads._();
 
   // AdMob account pub-3035772295627652, apps "에코마이크 Android/iOS".
   static const _bannerAndroid = 'ca-app-pub-3035772295627652/2012207743';
   static const _bannerIos = 'ca-app-pub-3035772295627652/1888170381';
-  static const _interstitialAndroid = 'INTERSTITIAL_ANDROID_PENDING';
-  static const _interstitialIos = 'INTERSTITIAL_IOS_PENDING';
+  static const _interstitialAndroid = 'ca-app-pub-3035772295627652/5825052564';
+  static const _interstitialIos = 'ca-app-pub-3035772295627652/5163631023';
   // Google's public test units — debug builds must never request live ads.
   static const _testBannerAndroid = 'ca-app-pub-3940256099942544/9214589741';
   static const _testBannerIos = 'ca-app-pub-3940256099942544/2435281174';
