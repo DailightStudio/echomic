@@ -62,8 +62,10 @@ class Ads {
   }
 }
 
-/// Anchored adaptive banner pinned under the Start button. Takes no space
-/// until an ad has loaded, so a failed load leaves the layout unchanged.
+/// Anchored adaptive banner pinned under the Start button. Reserves its slot as
+/// soon as the size is known, before the ad arrives: if the slot appeared on
+/// load, the Start button would jump up under a thumb already on its way and the
+/// tap would land on the ad. A failed load gives the slot back.
 class AdBanner extends StatefulWidget {
   const AdBanner({super.key});
 
@@ -73,6 +75,7 @@ class AdBanner extends StatefulWidget {
 
 class _AdBannerState extends State<AdBanner> {
   BannerAd? _ad;
+  AdSize? _size;
   bool _loaded = false;
 
   @override
@@ -87,6 +90,7 @@ class _AdBannerState extends State<AdBanner> {
     if (!mounted || !await ConsentInformation.instance.canRequestAds()) return;
     final size = await AdSize.getLargeAnchoredAdaptiveBannerAdSize(width);
     if (!mounted || size == null) return;
+    setState(() => _size = size);
     _ad = BannerAd(
       adUnitId: Ads.bannerUnitId,
       size: size,
@@ -96,6 +100,7 @@ class _AdBannerState extends State<AdBanner> {
         onAdFailedToLoad: (ad, err) {
           debugPrint('banner failed: $err');
           ad.dispose();
+          if (mounted) setState(() => _size = null);
         },
       ),
     )..load();
@@ -109,12 +114,13 @@ class _AdBannerState extends State<AdBanner> {
 
   @override
   Widget build(BuildContext context) {
+    final size = _size;
+    if (size == null) return const SizedBox.shrink();
     final ad = _ad;
-    if (!_loaded || ad == null) return const SizedBox.shrink();
     return SizedBox(
-      width: ad.size.width.toDouble(),
-      height: ad.size.height.toDouble(),
-      child: AdWidget(ad: ad),
+      width: size.width.toDouble(),
+      height: size.height.toDouble(),
+      child: _loaded && ad != null ? AdWidget(ad: ad) : null,
     );
   }
 }

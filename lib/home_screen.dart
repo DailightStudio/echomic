@@ -14,6 +14,9 @@ const double _kPresetDelayMs = 120.0;
 const double _kPresetFeedback = 0.35;
 const double _kPresetReverb = 0.25;
 
+// EQ bands, low to high: 100 Hz, 400 Hz, 1 kHz, 3 kHz, 8 kHz (native order).
+const List<String> _kEqBands = ['저음', '중저음', '중음', '중고음', '고음'];
+
 const String _kStartFailed =
     '마이크를 시작하지 못했습니다. 마이크를 쓰는 다른 앱을 닫고 다시 시작해 주세요.';
 const String _kRestartHint = '오디오 상태를 받지 못했습니다. 앱을 닫았다가 다시 열어 주세요.';
@@ -364,14 +367,22 @@ class _HomeScreenState extends State<HomeScreen> {
                     },
                     onChangeEnd: (_) => _savePrefs(),
                   ),
-                  _EQStrip(
-                    gains: _eqGains,
-                    onChanged: (band, v) {
-                      setState(() => _eqGains[band] = v);
-                      _sendParam(() => _engine.setEQBand(band, v));
-                    },
-                    onChangeEnd: (_) => _savePrefs(),
-                  ),
+                  // Horizontal like every other slider: vertical EQ sliders
+                  // grabbed the page's scroll drag and silently moved bands.
+                  for (int band = 0; band < _kEqBands.length; band++)
+                    _SliderTile(
+                      label: 'EQ ${_kEqBands[band]}',
+                      value: _eqGains[band],
+                      min: -12,
+                      max: 12,
+                      valueLabel:
+                          '${_eqGains[band] > 0 ? '+' : ''}${_eqGains[band].round()} dB',
+                      onChanged: (v) {
+                        setState(() => _eqGains[band] = v);
+                        _sendParam(() => _engine.setEQBand(band, v));
+                      },
+                      onChangeEnd: (_) => _savePrefs(),
+                    ),
                   SwitchListTile(
                     title: const Text('하울링 억제'),
                     subtitle: const Text('스피커에서 삐 소리가 나면 켜세요'),
@@ -503,56 +514,6 @@ class _LevelMeter extends StatelessWidget {
   }
 }
 
-class _EQStrip extends StatelessWidget {
-  const _EQStrip({
-    required this.gains,
-    required this.onChanged,
-    required this.onChangeEnd,
-  });
-
-  final List<double> gains;
-  final void Function(int band, double value) onChanged;
-  final void Function(double) onChangeEnd;
-
-  static const _labels = ['저음', '중저음', '중음', '중고음', '고음']; // 100/400/1k/3k/8k Hz
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('EQ', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 4),
-        Row(
-          children: List.generate(5, (i) {
-            return Expanded(
-              child: Column(
-                children: [
-                  RotatedBox(
-                    quarterTurns: 3,
-                    child: Slider(
-                      value: gains[i],
-                      min: -12,
-                      max: 12,
-                      onChanged: (v) => onChanged(i, v),
-                      onChangeEnd: onChangeEnd,
-                    ),
-                  ),
-                  Text(
-                    _labels[i],
-                    style: Theme.of(context).textTheme.labelSmall,
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            );
-          }),
-        ),
-      ],
-    );
-  }
-}
-
 /// Red "mic on" bar shown for the whole time the microphone is capturing
 /// (App Store guideline 2.5.14 — recording must be clearly indicated).
 class _MicLiveBanner extends StatefulWidget {
@@ -601,7 +562,7 @@ class _MicLiveBannerState extends State<_MicLiveBanner>
                     text: '마이크 사용 중\n',
                     style: TextStyle(fontWeight: FontWeight.w700),
                   ),
-                  TextSpan(text: '목소리를 실시간으로 들려줍니다. 녹음하거나 저장하지 않습니다.'),
+                  TextSpan(text: '녹음하거나 저장하지 않습니다.'),
                 ]),
                 style: TextStyle(color: Colors.white, fontSize: 13, height: 1.3),
               ),
