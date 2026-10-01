@@ -533,8 +533,9 @@ class _StageHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final surface = Theme.of(context).colorScheme.surface;
+    // 150dp keeps the volume slider above the fold on a 412x915dp phone.
     return SizedBox(
-      height: 200,
+      height: 150,
       child: Stack(
         fit: StackFit.expand,
         children: [
