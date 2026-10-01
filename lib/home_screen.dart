@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -17,6 +18,12 @@ const double _kPresetReverb = 0.25;
 // EQ bands, low to high: 100 Hz, 400 Hz, 1 kHz, 3 kHz, 8 kHz (native order).
 const List<String> _kEqBands = ['저음', '중저음', '중음', '중고음', '고음'];
 
+// Round first, then sign: 0.3 dB is '0 dB', not '+0 dB'.
+String _signedDb(double db) {
+  final r = db.round();
+  return '${r > 0 ? '+' : ''}$r dB';
+}
+
 const String _kStartFailed =
     '마이크를 시작하지 못했습니다. 마이크를 쓰는 다른 앱을 닫고 다시 시작해 주세요.';
 const String _kRestartHint = '오디오 상태를 받지 못했습니다. 앱을 닫았다가 다시 열어 주세요.';
@@ -34,7 +41,10 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _running = false;
   DateTime? _sessionStart;
   bool _busy = false;
+  // Short state for the stage header; _hint carries the sentence that says
+  // what to do, below it, where it can wrap at any font size.
   String _status = '대기 중';
+  String? _hint;
 
   bool _boostEnabled = false;
   double _gain = 2.0;
@@ -66,19 +76,22 @@ class _HomeScreenState extends State<HomeScreen> {
             if ((rms - _rmsLevel).abs() > 0.005) setState(() => _rmsLevel = rms);
           } else if (type == 'state') {
             final running = event['running'] as bool? ?? false;
+            final byUser = event['reason'] == 'user'; // 정지 in the notification
             if (running && !_running) {
               WakelockPlus.enable();
               _sessionStart ??= DateTime.now();
               setState(() {
                 _running = true;
-                _status = '실행 중 (저지연)';
+                _status = '실행 중';
+                _hint = null;
               });
             } else if (!running && _running) {
               _engine.stop(); // make sure nothing is left capturing
               WakelockPlus.disable();
               setState(() {
                 _running = false;
-                _status = '이어폰 연결이나 전화 때문에 멈췄습니다. 다시 시작해 주세요.';
+                _status = byUser ? '정지됨' : '멈춤';
+                _hint = byUser ? null : '이어폰 연결이나 전화 때문에 멈췄습니다. 다시 시작해 주세요.';
               });
             }
           }
@@ -86,13 +99,17 @@ class _HomeScreenState extends State<HomeScreen> {
         onError: (Object error) {
           debugPrint('audioEvents error: $error');
           if (!mounted) return;
-          setState(() => _status = _kRestartHint);
+          setState(() {
+            _status = '연결 오류';
+            _hint = _kRestartHint;
+          });
         },
       );
     } catch (e) {
       // 네이티브 이벤트 채널이 아직 준비되지 않았더라도 UI는 계속 렌더링한다.
       debugPrint('audioEvents init failed: $e');
-      _status = _kRestartHint;
+      _status = '연결 오류';
+      _hint = _kRestartHint;
     }
   }
 
@@ -180,6 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() {
           _running = false;
           _status = '정지됨';
+          _hint = null;
         });
         final started = _sessionStart;
         if (started != null) {
@@ -188,7 +206,10 @@ class _HomeScreenState extends State<HomeScreen> {
       } else {
         final PermissionStatus mic = await Permission.microphone.request();
         if (!mic.isGranted) {
-          setState(() => _status = '마이크 권한을 허용해야 시작할 수 있습니다.');
+          setState(() {
+            _status = '권한 필요';
+            _hint = '마이크 권한을 허용해야 시작할 수 있습니다.';
+          });
           if (mic.isPermanentlyDenied && mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -199,6 +220,11 @@ class _HomeScreenState extends State<HomeScreen> {
           }
           return;
         }
+
+        // The microphone FGS notification (with its 정지 button) only shows if
+        // this is granted. Asked here, at Start, so the reason is obvious.
+        // Android stops showing the dialog by itself after two denials.
+        if (Platform.isAndroid) await Permission.notification.request();
 
         // 스피커 경고
         if (mounted) {
@@ -229,12 +255,16 @@ class _HomeScreenState extends State<HomeScreen> {
         }
         setState(() {
           _running = ok;
-          _status = ok ? '실행 중' : _kStartFailed;
+          _status = ok ? '실행 중' : '시작 못 함';
+          _hint = ok ? null : _kStartFailed;
         });
       }
     } catch (e) {
       debugPrint('toggle failed: $e');
-      setState(() => _status = _running ? _kRestartHint : _kStartFailed);
+      setState(() {
+        _status = _running ? '연결 오류' : '시작 못 함';
+        _hint = _running ? _kRestartHint : _kStartFailed;
+      });
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -266,6 +296,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+              if (_hint != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text(
+                    _hint!,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.error),
+                  ),
+                ),
               _LevelMeter(level: _rmsLevel),
               const SizedBox(height: 12),
               FilledButton.tonalIcon(
@@ -380,8 +419,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       value: _eqGains[band],
                       min: -12,
                       max: 12,
-                      valueLabel:
-                          '${_eqGains[band] > 0 ? '+' : ''}${_eqGains[band].round()} dB',
+                      valueLabel: _signedDb(_eqGains[band]),
                       onChanged: (v) {
                         setState(() => _eqGains[band] = v);
                         _sendParam('eq$band', () => _engine.setEQBand(band, v));
