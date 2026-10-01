@@ -89,6 +89,36 @@ jobs:
           fi
           rm -f "$KEY"
 
+      # Cloud signing mints a new "Apple Development: Created via API" certificate
+      # on every fresh runner (the private key dies with the runner). The team cap
+      # is small — 10 piled up and signing failed on 2026-10-01. Revoke them after
+      # each signed run; distribution and personal certificates are left alone.
+      - name: Revoke CI development certificates
+        if: ${{ always() && (inputs.ios_signed || inputs.ios_upload) }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          pip3 install -q --break-system-packages pyjwt cryptography 2>/dev/null || pip3 install -q pyjwt cryptography
+          python3 - <<'PY'
+          import json, os, time, urllib.request, jwt
+          tok = jwt.encode({"iss": os.environ["ASC_ISSUER_ID"], "iat": int(time.time()), "exp": int(time.time()) + 600,
+                            "aud": "appstoreconnect-v1"}, os.environ["ASC_KEY_P8"], algorithm="ES256",
+                           headers={"kid": os.environ["ASC_KEY_ID"]})
+          def call(method, path):
+              r = urllib.request.Request("https://api.appstoreconnect.apple.com" + path, method=method,
+                                         headers={"Authorization": "Bearer " + tok})
+              raw = urllib.request.urlopen(r).read()
+              return json.loads(raw) if raw else {}
+          n = 0
+          for c in call("GET", "/v1/certificates?limit=200")["data"]:
+              a = c["attributes"]
+              if a.get("certificateType") == "DEVELOPMENT" and a.get("name") == "Apple Development: Created via API":
+                  call("DELETE", "/v1/certificates/" + c["id"]); n += 1
+          print("revoked", n)
+          PY
+
       - uses: actions/upload-artifact@v4
         if: ${{ inputs.ios_signed && !inputs.ios_upload }}
         with:
