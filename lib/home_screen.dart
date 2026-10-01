@@ -230,6 +230,9 @@ class _HomeScreenState extends State<HomeScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            // App Review 2.5.14: a clear, always-on indicator while the mic is live.
+            // It cannot be turned off and stays visible for the whole session.
+            if (_running) const _MicLiveBanner(),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -545,6 +548,61 @@ class _EQStrip extends StatelessWidget {
           }),
         ),
       ],
+    );
+  }
+}
+
+/// Red "mic on" bar shown for the whole time the microphone is capturing
+/// (App Store guideline 2.5.14 — recording must be clearly indicated).
+class _MicLiveBanner extends StatefulWidget {
+  const _MicLiveBanner();
+
+  @override
+  State<_MicLiveBanner> createState() => _MicLiveBannerState();
+}
+
+class _MicLiveBannerState extends State<_MicLiveBanner>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      liveRegion: true,
+      label: '마이크 사용 중',
+      child: Container(
+        width: double.infinity,
+        color: const Color(0xFFD32F2F),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            FadeTransition(
+              opacity: Tween<double>(begin: 0.35, end: 1).animate(_pulse),
+              child: const Icon(Icons.fiber_manual_record, color: Colors.white, size: 18),
+            ),
+            const SizedBox(width: 8),
+            const Icon(Icons.mic, color: Colors.white, size: 20),
+            const SizedBox(width: 6),
+            const Flexible(
+              child: Text(
+                '마이크 사용 중 · 목소리를 실시간으로 들려주는 중 (저장 안 함)',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
