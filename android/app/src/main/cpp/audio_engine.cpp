@@ -31,6 +31,18 @@ oboe::DataCallbackResult AudioEngine::DuplexProcessor::onBothStreamsReady(
                                              numOutputFrames);
 }
 
+oboe::ResultWithValue<int32_t> AudioEngine::DuplexProcessor::readInput(int32_t numFrames) {
+    oboe::ResultWithValue<int32_t> result = oboe::FullDuplexStream::readInput(numFrames);
+    if (!result) {
+        // Audio-thread context (inside the output stream's realtime
+        // callback): hand off to handleInputReadFailure(), which stays
+        // allocation/lock-free itself and only ever spawns one background
+        // thread per failure window.
+        engine_->handleInputReadFailure();
+    }
+    return result;
+}
+
 bool AudioEngine::start() {
     std::lock_guard<std::mutex> lock(lifecycleLock_);
     if (running_.load()) return true;
@@ -308,6 +320,40 @@ void AudioEngine::onErrorAfterClose(oboe::AudioStream * /*stream*/,
         if (myGeneration != generation_.load() || !running_.load()) return;
         if (!openStreams()) {
             LOGE("Restart after disconnect failed");
+            closeStreams();
+            running_.store(false);
+        } else {
+            generation_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }).detach();
+}
+
+void AudioEngine::handleInputReadFailure() {
+    // Called from the audio callback thread (DuplexProcessor::readInput) --
+    // stay allocation/lock-free and syscall-free here (no logging on this
+    // thread). The one-shot guard keeps a run of consecutive failing
+    // callbacks (before AAudio actually stops calling back) from spawning
+    // more than one handler thread.
+    if (inputFailurePending_.exchange(true)) return;
+
+    std::thread([this]() {
+        LOGE("Input read failed; tearing down and scheduling restart");
+        // Debounce before touching either stream: besides giving the route
+        // a moment to settle like the ErrorDisconnected path above, this
+        // also guarantees the triggering callback invocation has long since
+        // returned (so closeStreams() below isn't racing a still-running
+        // audio callback touching the same stream objects) -- unlike
+        // onErrorAfterClose(), Oboe gives no guarantee here that the stream
+        // is already stopped.
+        std::this_thread::sleep_for(kRestartDebounce);
+        std::lock_guard<std::mutex> lock(lifecycleLock_);
+        inputFailurePending_.store(false);
+        if (!running_.load()) return;  // already stopped by something else (e.g. fix 2)
+
+        generation_.fetch_add(1, std::memory_order_relaxed);
+        closeStreams();
+        if (!openStreams()) {
+            LOGE("Restart after input read failure failed");
             closeStreams();
             running_.store(false);
         } else {

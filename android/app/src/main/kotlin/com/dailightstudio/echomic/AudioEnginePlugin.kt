@@ -1,8 +1,12 @@
 package com.dailightstudio.echomic
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -22,6 +26,13 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private var eventSink: EventChannel.EventSink? = null
     private var pollingHandler: android.os.Handler? = null
     private var expectedRunning = false
+
+    // Fires just before the active output route disappears (e.g. wired
+    // headset unplugged) and audio would otherwise fall back to the
+    // built-in speaker -- stop immediately instead of letting the native
+    // ErrorDisconnected auto-reconnect land on the speaker and howl into
+    // the still-open mic.
+    private var noisyReceiver: BroadcastReceiver? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         appContext = binding.applicationContext
@@ -49,6 +60,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         eventSink = null
         nativeStop()
         stopForegroundService()
+        unregisterNoisyReceiver()
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -56,13 +68,17 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
             "start" -> {
                 val ok = nativeStart()
                 expectedRunning = ok
-                if (ok) startForegroundService()
+                if (ok) {
+                    startForegroundService()
+                    registerNoisyReceiver()
+                }
                 result.success(ok)
             }
             "stop" -> {
                 nativeStop()
                 expectedRunning = false
                 stopForegroundService()
+                unregisterNoisyReceiver()
                 result.success(null)
             }
             "setGain" -> {
@@ -126,6 +142,11 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 if (expectedRunning && !running) {
                     sink.success(mapOf("type" to "state", "running" to false))
                     expectedRunning = false
+                    // Native died on its own (e.g. a failed input read/
+                    // reconnect) without going through stop(): the FGS
+                    // notification would otherwise outlive the engine.
+                    stopForegroundService()
+                    unregisterNoisyReceiver()
                 }
                 // 레벨 이벤트
                 if (running) {
@@ -155,6 +176,34 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
 
     private fun stopForegroundService() {
         appContext.stopService(Intent(appContext, EchoMicForegroundService::class.java))
+    }
+
+    // --- Stop before the route falls back to the speaker (fix: unplug-> howl) ---
+    private fun registerNoisyReceiver() {
+        if (noisyReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                nativeStop()
+                expectedRunning = false
+                stopForegroundService()
+                unregisterNoisyReceiver()
+                eventSink?.success(mapOf("type" to "state", "running" to false))
+            }
+        }
+        ContextCompat.registerReceiver(
+            appContext,
+            receiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        noisyReceiver = receiver
+    }
+
+    private fun unregisterNoisyReceiver() {
+        noisyReceiver?.let {
+            appContext.unregisterReceiver(it)
+            noisyReceiver = null
+        }
     }
 
     // --- JNI entry points implemented in jni_bridge.cpp ---

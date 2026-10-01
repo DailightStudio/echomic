@@ -7,6 +7,12 @@ enum AudioEngineError: LocalizedError {
     /// retry start().
     case microphoneAccessNotRequested
     case microphoneAccessDenied
+    /// The negotiated hardware input format reports 0 Hz and/or 0 channels
+    /// (e.g. mid-interruption, or a route still settling after an accessory
+    /// change). Connecting AVAudioEngine nodes with such a format raises an
+    /// uncatchable ObjC exception instead of throwing, so this is checked
+    /// explicitly before any connect(...) call.
+    case invalidInputFormat
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +20,8 @@ enum AudioEngineError: LocalizedError {
             return "Microphone access not requested yet"
         case .microphoneAccessDenied:
             return "Microphone access denied"
+        case .invalidInputFormat:
+            return "Invalid audio input format (0 Hz or 0 channels)"
         }
     }
 }
@@ -191,10 +199,6 @@ final class AudioEngine: NSObject {
     private var processingFormat: AVAudioFormat?
 
     private var isReconfiguring = false
-    // Set when the engine was torn down automatically (interruption/route
-    // change) rather than by an explicit stop() call, so the matching
-    // "resume" notification knows whether it is allowed to restart.
-    private var autoStoppedPendingResume = false
 
     private var observers: [NSObjectProtocol] = []
 
@@ -212,12 +216,29 @@ final class AudioEngine: NSObject {
 
     // MARK: - Parameters
 
-    func setGain(_ value: Float) { gain = value }
+    // Hard ceiling at 4x: beyond that the compressor makeup + echo feed and
+    // the output limiter start fighting each other audibly, and it is well
+    // past any legitimate "quiet mic" use case.
+    func setGain(_ value: Float) { gain = min(max(value, 0), 4.0) }
     func setBoost(_ enabled: Bool) { boostEnabled = enabled }
     func setEchoDelay(_ delayMs: Float) { lastDelayMs = delayMs; echo.setDelayMs(delayMs) }
     func setEchoFeedback(_ value: Float) { lastFeedback = value; echo.setFeedback(value) }
 
     // wetDryMix: 0.0(dry)~1.0(wet) -> AVAudioUnitReverb expects 0~100.
+    //
+    // NOTE: AVAudioUnitReverb.wetDryMix is a true equal-power-ish crossfade
+    // on a single node, not an independent dry gain + wet send: at mix=1.0
+    // the dry voice is fully silent, and the dry level falls as the mix
+    // rises even well below 1.0. There is no parameter on this node that
+    // reduces the dry signal less than that mapping dictates. The correct
+    // fix -- a parallel topology (source -> dry mixer bus, source -> 100%-
+    // wet reverb -> wet mixer bus, both summed before the limiter) would
+    // decouple dry level from wetDryMix entirely, but needs a mixer node
+    // with per-bus input volumes threaded through the existing
+    // attach/detach lifecycle (see persistentNodesAttached) and could not
+    // be verified against a real compiler on this machine, so it is left
+    // as a documented follow-up rather than risking an unverified graph
+    // change.
     func setReverbMix(_ mix: Float) {
         lastReverbMix = min(max(mix, 0), 1)
         reverb.wetDryMix = lastReverbMix * 100
@@ -250,8 +271,16 @@ final class AudioEngine: NSObject {
             // negotiated hardware input format -- no separate capture session
             // needed.
             let inputFormat = engine.inputNode.outputFormat(forBus: 0)
-            let sampleRate = inputFormat.sampleRate > 0 ? inputFormat.sampleRate : 48_000
-            let channels = max(1, Int(inputFormat.channelCount))
+            // A disconnected/invalid route (e.g. mid-interruption, or an
+            // accessory route still settling) can report 0 Hz / 0 channels
+            // here. engine.connect(inputNode, ...) below would then raise
+            // an uncatchable ObjC exception instead of a Swift error --
+            // fail start() cleanly instead.
+            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+                throw AudioEngineError.invalidInputFormat
+            }
+            let sampleRate = inputFormat.sampleRate
+            let channels = Int(inputFormat.channelCount)
             channelCount = channels
 
             guard let format = AVAudioFormat(
@@ -346,7 +375,6 @@ final class AudioEngine: NSObject {
             registerSessionObservers()
 
             isRunning = true
-            autoStoppedPendingResume = false
             return true
         } catch {
             NSLog("echomic: failed to start engine: \(error)")
@@ -357,7 +385,6 @@ final class AudioEngine: NSObject {
 
     func stop() {
         internalStop(keepObservers: false)
-        autoStoppedPendingResume = false
     }
 
     // MARK: - Internals
@@ -370,10 +397,12 @@ final class AudioEngine: NSObject {
         persistentNodesAttached = true
     }
 
-    /// Tears down the engine graph and deactivates the session. When
-    /// `keepObservers` is true (interruption/route-change-driven teardown),
-    /// the session lifecycle observers are left registered so the matching
-    /// "resume" notification can restart us later.
+    /// Tears down the engine graph and deactivates the session. `keepObservers`
+    /// is only `true` for an immediate, synchronous stop+start done by this
+    /// class itself while reconfiguring a still-running engine (new device /
+    /// configuration change) -- never to let some later notification resume
+    /// us; auto-resume from a stopped state is intentionally not implemented
+    /// (see the session observers below).
     private func internalStop(keepObservers: Bool) {
         if !keepObservers {
             removeSessionObservers()
@@ -478,21 +507,17 @@ final class AudioEngine: NSObject {
                 // plugin's level/state poll reports it (otherwise the UI
                 // keeps showing "running" while the engine is dead).
                 guard self.isRunning else { return }
-                self.autoStoppedPendingResume = true
                 DispatchQueue.main.async {
-                    self.internalStop(keepObservers: true)
+                    self.internalStop(keepObservers: false)
                 }
             case .ended:
-                guard self.autoStoppedPendingResume,
-                      let rawOptions = info[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
-                let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
-                guard options.contains(.shouldResume), !self.isReconfiguring else { return }
-                self.isReconfiguring = true
-                self.autoStoppedPendingResume = false
-                DispatchQueue.main.async {
-                    _ = self.start()
-                    self.isReconfiguring = false
-                }
+                // Auto-resume is intentionally NOT implemented. Silently
+                // restarting after e.g. a phone call would leave the mic
+                // live while the UI still shows "stopped" if the user
+                // doesn't notice the app resumed on its own (App Review
+                // 2.5.14 risk). Once stopped here, the user must tap Start
+                // again.
+                break
             @unknown default:
                 break
             }
@@ -513,30 +538,28 @@ final class AudioEngine: NSObject {
                 // Headphones unplugged (or similar): never fall through to
                 // the built-in speaker+mic combination while running --
                 // that is the textbook acoustic-feedback (howl) setup.
+                // Auto-resume is intentionally NOT implemented here (see
+                // the interruption observer above) -- stays stopped until
+                // the user taps Start again.
                 guard self.isRunning else { return }
-                self.autoStoppedPendingResume = true
                 DispatchQueue.main.async {
-                    self.internalStop(keepObservers: true)
+                    self.internalStop(keepObservers: false)
                 }
             case .newDeviceAvailable:
-                if self.isRunning {
-                    let newFormat = self.engine.inputNode.outputFormat(forBus: 0)
-                    guard let fmt = self.processingFormat, newFormat.sampleRate > 0,
-                          abs(fmt.sampleRate - newFormat.sampleRate) > 1.0
-                            || fmt.channelCount != newFormat.channelCount,
-                          !self.isReconfiguring else { return }
-                    self.isReconfiguring = true
-                    DispatchQueue.main.async {
-                        self.internalStop(keepObservers: true)
-                        _ = self.start()
-                        self.isReconfiguring = false
-                    }
-                    return
-                }
-                guard self.autoStoppedPendingResume, !self.isReconfiguring else { return }
+                // Only acts while already running, to reconnect onto the
+                // new route's format (e.g. a different mic sample rate).
+                // This is a live reconfigure, not a resume from stopped --
+                // isRunning is true throughout (stop+start happen back to
+                // back, synchronously, on the main queue, so the plugin's
+                // poll never observes an intermediate `false`).
+                guard self.isRunning, !self.isReconfiguring else { return }
+                let newFormat = self.engine.inputNode.outputFormat(forBus: 0)
+                guard let fmt = self.processingFormat, newFormat.sampleRate > 0,
+                      abs(fmt.sampleRate - newFormat.sampleRate) > 1.0
+                        || fmt.channelCount != newFormat.channelCount else { return }
                 self.isReconfiguring = true
-                self.autoStoppedPendingResume = false
                 DispatchQueue.main.async {
+                    self.internalStop(keepObservers: true)
                     _ = self.start()
                     self.isReconfiguring = false
                 }
@@ -552,16 +575,15 @@ final class AudioEngine: NSObject {
         ) { [weak self] _ in
             guard let self = self, !self.isReconfiguring else { return }
             self.isReconfiguring = true
-            let wasRunning = self.isRunning
             // Every existing AVAudioEngine/session object is invalid once
             // media services reset -- drop bookkeeping without touching the
-            // now-defunct engine, then build a fresh one.
+            // now-defunct engine, then build a fresh one. Deliberately does
+            // NOT auto-restart even if it was running before (see the
+            // interruption observer above) -- the user must tap Start
+            // again.
             self.resetLocalState()
             self.engine = AVAudioEngine()
             self.persistentNodesAttached = false
-            if wasRunning {
-                _ = self.start()
-            }
             self.isReconfiguring = false
         }
 

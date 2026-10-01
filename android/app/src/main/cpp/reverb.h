@@ -31,11 +31,13 @@ public:
         wet_.store(std::min(std::max(wet, 0.0f), 1.0f));
     }
 
-    // in-place, interleaved. 리버브 wet/dry 믹스 적용.
+    // in-place, interleaved. Send 믹스: dry는 항상 unity로 유지하고 wet을
+    // 그 위에 더한다 (크로스페이드 아님) -- 그래야 mix를 올려도 원래 목소리
+    // 레벨이 줄지 않는다. 뒤이어 도는 최종 리미터(Compressor::limit())가
+    // 합산으로 생기는 피크를 잡아준다.
     void process(float* samples, int numFrames, int numChannels) {
         const float wet = wet_.load();
         if (wet < 1e-4f) return;
-        const float dry = 1.0f - wet;
 
         for (int f = 0; f < numFrames; ++f) {
             int base = f * numChannels;
@@ -53,9 +55,9 @@ public:
             float out = combOut;
             for (auto& a : allpass_) out = a.process(out);
 
-            // wet/dry 믹스
+            // Send: dry 그대로 + wet*mix
             for (int ch = 0; ch < numChannels; ++ch) {
-                samples[base + ch] = samples[base + ch] * dry + out * wet;
+                samples[base + ch] = samples[base + ch] + out * wet;
             }
         }
     }

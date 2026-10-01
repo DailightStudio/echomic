@@ -14,6 +14,27 @@ class MainActivity : FlutterActivity() {
         flutterEngine.plugins.add(AudioEnginePlugin())
     }
 
+    // FlutterActivity forwards both the legacy back button AND predictive
+    // back gestures to Dart's NavigationChannel; when Dart has no more
+    // routes to pop it calls back here via this Host hook (PlatformPlugin.
+    // popSystemNavigator()) before falling back to Activity.finish(). While
+    // the native engine is running, intercept that and background the task
+    // instead -- finishing would destroy the FlutterEngine, which tears
+    // down the mic (AudioEnginePlugin.onDetachedFromEngine -> nativeStop()
+    // + stopForegroundService()).
+    override fun popSystemNavigator(): Boolean {
+        if (nativeIsRunning()) {
+            moveTaskToBack(true)
+            return true
+        }
+        return super.popSystemNavigator()
+    }
+
+    // Reads AudioEngine's running_ flag directly (ignores `this`; see
+    // jni_bridge.cpp) so Back can decide synchronously without round-
+    // tripping through the Flutter plugin/method channel.
+    private external fun nativeIsRunning(): Boolean
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Needed for the "에코마이크 실행 중" ongoing notification the
@@ -32,5 +53,9 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val REQUEST_POST_NOTIFICATIONS = 1001
+
+        init {
+            System.loadLibrary("echomic_engine")
+        }
     }
 }

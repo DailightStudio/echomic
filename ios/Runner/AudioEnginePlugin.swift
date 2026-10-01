@@ -11,6 +11,10 @@ final class AudioEnginePlugin: NSObject {
 
     private var eventSink: FlutterEventSink?
     private var pollingTimer: Timer?
+    // Last running/stopped state reported to Dart over the event channel
+    // (set directly on start/stop, and resynced by the poll below on any
+    // transition the engine makes on its own) -- never trust a single
+    // source for this so Dart's UI can't drift from the real engine state.
     private var expectedRunning = false
 
     static func register(with messenger: FlutterBinaryMessenger) {
@@ -97,10 +101,12 @@ final class AudioEnginePlugin: NSObject {
         pollingTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self = self, let sink = self.eventSink else { return }
             let running = self.engine.isRunning
-            // 상태 변화 감지: 시작을 기대했으나 엔진이 멈춘 경우
-            if self.expectedRunning && !running {
-                sink(["type": "state", "running": false])
-                self.expectedRunning = false
+            // 상태 변화 감지: Dart 가 마지막으로 알고 있던 상태와 실제 엔진
+            // 상태가 다르면 알려서 동기화한다 (엔진이 스스로 멈춘 경우는
+            // false, 드물게 늦게 true 로 바뀐 경우까지 모두 포함).
+            if running != self.expectedRunning {
+                sink(["type": "state", "running": running])
+                self.expectedRunning = running
             }
             // 레벨 이벤트 (Float -> Double: StandardMessageCodec 는 Double 만 직렬화)
             if running {

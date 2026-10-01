@@ -1,6 +1,7 @@
 #ifndef ECHOMIC_AUDIO_ENGINE_H
 #define ECHOMIC_AUDIO_ENGINE_H
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -40,7 +41,12 @@ public:
     bool start();
     void stop();
 
-    void setGain(float gain) { gain_.store(gain); }
+    // Capped at 4x: the sim that found the limiter overshoot (fix 3) also
+    // showed unusably harsh limiting artifacts above this with the old
+    // UI's up-to-8x boost slider.
+    void setGain(float gain) {
+        gain_.store(std::min(std::max(gain, 0.0f), kMaxGain));
+    }
     void setBoost(bool enabled)       { boost_.store(enabled); }
     void setEchoDelay(float delayMs) { echo_.setDelayMs(delayMs); }
     void setEchoFeedback(float feedback) { echo_.setFeedback(feedback); }
@@ -72,6 +78,11 @@ private:
                                                      int numInputFrames,
                                                      void *outputData,
                                                      int numOutputFrames) override;
+        // FullDuplexStream::onAudioReady() (see the vendored
+        // FullDuplexStream.h) treats a failed readInput() as a silent
+        // DataCallbackResult::Stop -- no error callback, so without this
+        // override running_ never notices and the UI meter just freezes.
+        oboe::ResultWithValue<int32_t> readInput(int32_t numFrames) override;
 
     private:
         AudioEngine *engine_;
@@ -84,6 +95,7 @@ private:
                                                       int numInputFrames,
                                                       void *outputData,
                                                       int numOutputFrames);
+    void handleInputReadFailure();
 
     DuplexProcessor duplex_;
 
@@ -121,6 +133,13 @@ private:
     // stream pair) can recognize it is no longer relevant and bail out
     // instead of acting on a torn-down engine.
     std::atomic<uint64_t> generation_{0};
+
+    // Guards handleInputReadFailure() so a run of consecutive failing
+    // callbacks (before the stream actually stops) only spawns one
+    // handler thread instead of one per callback.
+    std::atomic<bool> inputFailurePending_{false};
+
+    static constexpr float kMaxGain = 4.0f;
 };
 
 #endif  // ECHOMIC_AUDIO_ENGINE_H
