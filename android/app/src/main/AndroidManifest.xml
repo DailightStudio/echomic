@@ -2,6 +2,9 @@
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature
         android:name="android.hardware.microphone"
@@ -14,7 +17,7 @@
         android:required="false" />
 
     <application
-        android:label="echomic"
+        android:label="에코마이크"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -41,5 +44,9 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <service
+            android:name=".EchoMicForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 </manifest>
