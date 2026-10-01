@@ -244,23 +244,16 @@ class _HomeScreenState extends State<HomeScreen> {
             if (_running) const _MicLiveBanner(),
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                padding: const EdgeInsets.only(bottom: 16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-              const SizedBox(height: 8),
-              Icon(
-                _running ? Icons.mic : Icons.mic_off,
-                size: 72,
-                color: _running ? cs.primary : cs.onSurfaceVariant,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                _status,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
+              _StageHeader(running: _running, status: _status),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
               _LevelMeter(level: _rmsLevel),
               const SizedBox(height: 12),
               FilledButton.tonalIcon(
@@ -401,6 +394,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
+                  ],
+                ),
+              ),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
@@ -506,6 +502,77 @@ class _LevelMeter extends StatelessWidget {
               backgroundColor:
                   Theme.of(context).colorScheme.surfaceContainerHighest,
               valueColor: AlwaysStoppedAnimation<Color>(color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Stage photo behind the status line. Grey and dim while idle, full colour
+/// once the mic is live, so the state reads at a glance from across the room.
+class _StageHeader extends StatelessWidget {
+  const _StageHeader({required this.running, required this.status});
+
+  final bool running;
+  final String status;
+
+  // Saturation s and brightness b as a colour matrix (luma weights Rec. 709).
+  static List<double> _grade(double s, double b) {
+    const r = 0.2126, g = 0.7152, bl = 0.0722;
+    final i = 1 - s;
+    return [
+      b * (i * r + s), b * i * g, b * i * bl, 0, 0,
+      b * i * r, b * (i * g + s), b * i * bl, 0, 0,
+      b * i * r, b * i * g, b * (i * bl + s), 0, 0,
+      0, 0, 0, 1, 0,
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final surface = Theme.of(context).colorScheme.surface;
+    return SizedBox(
+      height: 200,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          TweenAnimationBuilder<double>(
+            tween: Tween(end: running ? 1 : 0),
+            duration: const Duration(milliseconds: 600),
+            curve: Curves.easeOut,
+            builder: (context, t, child) => ColorFiltered(
+              colorFilter: ColorFilter.matrix(_grade(t, 0.55 + 0.45 * t)),
+              child: child,
+            ),
+            child: Image.asset(
+              'assets/photos/header_mic.jpg',
+              fit: BoxFit.cover,
+              alignment: const Alignment(0, -0.3),
+              excludeFromSemantics: true,
+            ),
+          ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [surface.withValues(alpha: 0), surface],
+                stops: const [0.45, 1],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 24,
+            right: 24,
+            bottom: 12,
+            child: Text(
+              status,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
             ),
           ),
         ],
