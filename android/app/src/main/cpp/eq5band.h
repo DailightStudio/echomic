@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <atomic>
 
+#include "triple_buffer.h"
+
 // 5-band biquad equalizer.
 //   band 0: 100 Hz  low shelf
 //   band 1: 400 Hz  parametric (peaking)
@@ -15,9 +17,10 @@
 // Parametric bands use a fixed bandwidth Q of 1.5 octaves.
 //
 // Thread safety: setBandGain() may be called from a control (JNI) thread while
-// process() runs on the audio thread. Each band keeps its coefficients in a
-// 2-slot double buffer published through an atomic index, so the audio thread
-// never observes a half-written (torn) coefficient set.
+// process() runs on the audio thread. Each band hands its coefficients to the
+// audio thread through a lock-free TripleBuffer, which (unlike a naive 2-slot
+// double buffer) stays correct even if the control thread publishes more than
+// once while the audio thread is still reading -- see triple_buffer.h.
 class EQ5Band {
 public:
     void prepare(float sampleRate) {
@@ -48,7 +51,7 @@ public:
         const int chCount = std::min(channels, 2);
         for (int b = 0; b < 5; b++) {
             auto& bd = bands_[b];
-            const Coeffs& c = bd.coeff[bd.coeffIndex.load(std::memory_order_acquire)];
+            const Coeffs& c = bd.coeffBuf.readSlot();
             const float b0 = c.b0, b1 = c.b1, b2 = c.b2, a1 = c.a1, a2 = c.a2;
             for (int ch = 0; ch < chCount; ch++) {
                 float lx1 = bd.x1[ch], lx2 = bd.x2[ch], ly1 = bd.y1[ch], ly2 = bd.y2[ch];
@@ -74,8 +77,7 @@ private:
     struct Band {
         float freq{1000};
         float gainDb{0};                 // control-thread cache, restored by prepare()
-        Coeffs coeff[2];                 // double buffer; audio thread reads active slot
-        std::atomic<int> coeffIndex{0};  // index of the active slot
+        TripleBuffer<Coeffs> coeffBuf;   // lock-free control-thread -> audio-thread handoff
         float x1[2]{}, x2[2]{}, y1[2]{}, y2[2]{};
         bool shelf{false}, isHigh{false};
     } bands_[5];
@@ -122,14 +124,14 @@ private:
             a2 =  1.0f - alpha / A;
         }
 
-        // Write into the inactive slot, then publish it atomically so the
-        // audio thread never reads a torn coefficient set.
-        const int next = 1 - bd.coeffIndex.load(std::memory_order_relaxed);
-        Coeffs& c = bd.coeff[next];
+        // Fill the writer's private slot, then publish it atomically so the
+        // audio thread never reads a torn -- or, with a plain double buffer,
+        // possibly writer-lapped -- coefficient set.
+        Coeffs& c = bd.coeffBuf.writeSlot();
         float inv = 1.0f / a0;
         c.b0 = b0 * inv; c.b1 = b1 * inv; c.b2 = b2 * inv;
         c.a1 = a1 * inv; c.a2 = a2 * inv;
-        bd.coeffIndex.store(next, std::memory_order_release);
+        bd.coeffBuf.commit();
     }
 };
 

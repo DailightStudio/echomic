@@ -3,20 +3,38 @@
 #include <android/log.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #define LOG_TAG "EchomicEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+namespace {
+// Debounce before reopening streams after ErrorDisconnected (headset/BT
+// plug event): gives the audio route a moment to settle so the reopen
+// doesn't race the system still tearing down/renegotiating the old route.
+constexpr auto kRestartDebounce = std::chrono::milliseconds(300);
+}  // namespace
+
+AudioEngine::AudioEngine() : duplex_(this) {}
+
 AudioEngine::~AudioEngine() {
     stop();
+}
+
+oboe::DataCallbackResult AudioEngine::DuplexProcessor::onBothStreamsReady(
+        const void *inputData, int numInputFrames, void *outputData, int numOutputFrames) {
+    return engine_->processBothStreamsReady(inputData, numInputFrames, outputData,
+                                             numOutputFrames);
 }
 
 bool AudioEngine::start() {
     std::lock_guard<std::mutex> lock(lifecycleLock_);
     if (running_.load()) return true;
+    generation_.fetch_add(1, std::memory_order_relaxed);
     if (!openStreams()) {
         closeStreams();
         return false;
@@ -28,6 +46,10 @@ bool AudioEngine::start() {
 void AudioEngine::stop() {
     std::lock_guard<std::mutex> lock(lifecycleLock_);
     if (!running_.load() && !inputStream_ && !outputStream_) return;
+    // Invalidate any restart thread that might currently be sleeping off a
+    // disconnect debounce, and any late error callback from the streams
+    // closeStreams() is about to tear down.
+    generation_.fetch_add(1, std::memory_order_relaxed);
     running_.store(false);
     closeStreams();
 }
@@ -40,9 +62,18 @@ bool AudioEngine::openStreams() {
         ->setSharingMode(oboe::SharingMode::Exclusive)
         ->setFormat(oboe::AudioFormat::Float)
         ->setChannelCount(oboe::ChannelCount::Mono)
-        ->setDataCallback(this)
+        ->setDataCallback(&duplex_)
         ->setErrorCallback(this)
-        ->setUsage(oboe::Usage::VoiceCommunication);
+        // Usage::Game (Android/Oboe's documented low-latency "pro audio"
+        // usage) + ContentType::Music, NOT VoiceCommunication:
+        // VoiceCommunication puts the stream on the telephony audio path,
+        // which (a) routes to the earpiece instead of the loudspeaker when
+        // no headset is attached, (b) ties its volume to the call-volume
+        // stream instead of the media volume keys, and (c) can duck/pause
+        // other apps' playback the way an incoming call would. Game+Music
+        // avoids all three while keeping the low-latency fast-mixer path.
+        ->setUsage(oboe::Usage::Game)
+        ->setContentType(oboe::ContentType::Music);
 
     oboe::Result result = outBuilder.openStream(outputStream_);
     if (result != oboe::Result::OK) {
@@ -54,6 +85,10 @@ bool AudioEngine::openStreams() {
     channelCount_ = outputStream_->getChannelCount();
 
     // ---- Input stream, matched to the output's rate/channels. ----
+    // No data/error callback: under the FullDuplexStream pattern the input
+    // stream is read with a non-blocking read() from inside the output
+    // stream's callback (see onBothStreamsReady()/FullDuplexStream), so it
+    // needs no callback thread of its own.
     oboe::AudioStreamBuilder inBuilder;
     inBuilder.setDirection(oboe::Direction::Input)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -67,8 +102,9 @@ bool AudioEngine::openStreams() {
         ->setChannelConversionAllowed(true)
         ->setFormatConversionAllowed(true)
         ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
-        ->setDataCallback(this)
-        ->setErrorCallback(this);
+        // Oboe's recommended sizing so the input stream has enough headroom
+        // that the output callback's non-blocking reads don't starve it.
+        ->setBufferCapacityInFrames(outputStream_->getBufferCapacityInFrames() * 2);
 
     result = inBuilder.openStream(inputStream_);
     if (result != oboe::Result::OK) {
@@ -89,7 +125,7 @@ bool AudioEngine::openStreams() {
         return false;
     }
 
-    // Prepare the echo delay line for the negotiated format.
+    // Prepare the DSP chain for the negotiated format.
     echo_.prepare(sampleRate_, channelCount_);
     echo_.reset();
 
@@ -105,24 +141,28 @@ bool AudioEngine::openStreams() {
     eq_.prepare(static_cast<float>(sampleRate_));
     suppressor_.prepare(static_cast<float>(sampleRate_), channelCount_);
 
-    // FIFO holds ~200 ms of audio; plenty of headroom over the callback size.
-    const int frames = std::max(sampleRate_ / 5, 2048);
-    fifoCapacity_ = frames * channelCount_;
-    fifo_.assign(static_cast<size_t>(fifoCapacity_), 0.0f);
-    fifoWrite_.store(0);
-    fifoRead_.store(0);
+    // Scratch buffer the DSP chain processes in place, sized to the same
+    // bound FullDuplexStream uses for its own internal input buffer so a
+    // single onBothStreamsReady() callback can never see more input frames
+    // than this holds. Allocated here (control thread, before streams
+    // start), never resized on the audio thread.
+    const int scratchCapacityFrames = outputStream_->getBufferCapacityInFrames();
+    scratch_.assign(static_cast<size_t>(scratchCapacityFrames) * channelCount_, 0.0f);
 
     // Tighten the output buffer towards the burst size for minimal latency.
     outputStream_->setBufferSizeInFrames(outputStream_->getFramesPerBurst() * 2);
 
-    result = outputStream_->requestStart();
-    if (result != oboe::Result::OK) {
-        LOGE("Failed to start output stream: %s", oboe::convertToText(result));
-        return false;
-    }
-    result = inputStream_->requestStart();
-    if (result != oboe::Result::OK) {
-        LOGE("Failed to start input stream: %s", oboe::convertToText(result));
+    duplex_.setInputStream(inputStream_.get());
+    duplex_.setOutputStream(outputStream_.get());
+    // No cushion, read as soon as any frames are available: minimum latency
+    // is a product requirement here (vs. the extra underrun margin a
+    // non-zero cushion/threshold would buy).
+    duplex_.setNumInputBurstsCushion(0);
+    duplex_.setMinimumFramesBeforeRead(0);
+
+    oboe::Result startResult = duplex_.start();
+    if (startResult != oboe::Result::OK) {
+        LOGE("Failed to start full-duplex streams: %s", oboe::convertToText(startResult));
         return false;
     }
 
@@ -142,85 +182,136 @@ void AudioEngine::closeStreams() {
         outputStream_->close();
         outputStream_.reset();
     }
+    // Drop FullDuplexStream's own raw pointers so nothing can dereference a
+    // stream we just destroyed.
+    duplex_.setInputStream(nullptr);
+    duplex_.setOutputStream(nullptr);
 }
 
-oboe::DataCallbackResult AudioEngine::onAudioReady(oboe::AudioStream *stream,
-                                                   void *audioData,
-                                                   int32_t numFrames) {
+void AudioEngine::runDsp(float *buf, int numFrames) {
     const int channels = channelCount_;
     const int sampleCount = numFrames * channels;
 
-    if (stream->getDirection() == oboe::Direction::Input) {
-        // Process mic input then push into the FIFO for the output stream.
-        auto *in = static_cast<float *>(audioData);
-        // iOS signal flow: HPF -> Gate -> Comp -> Echo -> Limit -> Suppressor -> FreqShifter -> EQ -> Reverb
-        hpf_.process(in, numFrames, channels);
-        gate_.process(in, numFrames, channels);
-        const bool boost = boost_.load();
-        comp_.process(in, numFrames, channels, boost);
-        echo_.process(in, numFrames, boost ? gain_.load() : 1.0f);
-        comp_.limit(in, numFrames * channels);
-        suppressor_.process(in, numFrames, channels);
-        freqShifter_.process(in, numFrames, channels);
-        eq_.process(in, numFrames, channels);
-        reverb_.process(in, numFrames, channels);
+    // Signal flow: HPF -> Gate -> Comp -> Echo -> Suppressor -> FreqShifter
+    // -> EQ -> Reverb -> Master -> Limiter. The limiter runs last (after
+    // master gain), per the audio-dsp-review audit, so it is the final
+    // safety ceiling on exactly what reaches the output -- nothing after it
+    // can reintroduce clipping.
+    hpf_.process(buf, numFrames, channels);
+    gate_.process(buf, numFrames, channels);
 
-        // 마스터볼륨
-        const float master = masterGain_.load();
-        if (master < 0.9999f) {
-            for (int i = 0; i < sampleCount; ++i) in[i] *= master;
-        }
+    const bool boost = boost_.load();
+    if (boost) {
+        // Boost off = bypass the compressor entirely (gain 1.0): skip
+        // process() outright rather than merely disabling its makeup gain,
+        // so no envelope-follower gain reduction is applied either.
+        comp_.process(buf, numFrames, channels, /*applyMakeup=*/true);
+    }
+    echo_.process(buf, numFrames, boost ? gain_.load() : 1.0f);
+    suppressor_.process(buf, numFrames, channels);
+    freqShifter_.process(buf, numFrames, channels);
+    eq_.process(buf, numFrames, channels);
+    reverb_.process(buf, numFrames, channels);
 
-        // RMS 계산 (UI 폴링용)
-        if (sampleCount > 0) {
-            float sumSq = 0.0f;
-            for (int i = 0; i < sampleCount; ++i) sumSq += in[i] * in[i];
-            rmsLevel_.store(std::sqrt(sumSq / static_cast<float>(sampleCount)));
-        }
+    // 마스터볼륨
+    const float master = masterGain_.load();
+    if (master < 0.9999f) {
+        for (int i = 0; i < sampleCount; ++i) buf[i] *= master;
+    }
 
-        int writeIdx = fifoWrite_.load(std::memory_order_relaxed);
-        const int readIdx = fifoRead_.load(std::memory_order_acquire);
-        for (int i = 0; i < sampleCount; ++i) {
-            const int next = (writeIdx + 1) % fifoCapacity_;
-            if (next == readIdx) break;  // FIFO full: drop to avoid blocking
-            fifo_[static_cast<size_t>(writeIdx)] = in[i];
-            writeIdx = next;
-        }
-        fifoWrite_.store(writeIdx, std::memory_order_release);
+    // Limiter: always-on safety ceiling, independent of boost.
+    comp_.limit(buf, sampleCount);
+
+    // RMS 계산 (UI 폴링용) -- reflects the final, post-limiter signal.
+    if (sampleCount > 0) {
+        float sumSq = 0.0f;
+        for (int i = 0; i < sampleCount; ++i) sumSq += buf[i] * buf[i];
+        rmsLevel_.store(std::sqrt(sumSq / static_cast<float>(sampleCount)));
+    }
+}
+
+oboe::DataCallbackResult AudioEngine::processBothStreamsReady(const void *inputData,
+                                                               int numInputFrames,
+                                                               void *outputData,
+                                                               int numOutputFrames) {
+    auto *out = static_cast<float *>(outputData);
+    const int outSamples = numOutputFrames * channelCount_;
+
+    if (numInputFrames <= 0) {
+        // Priming/underrun: no input yet this callback.
+        std::fill(out, out + outSamples, 0.0f);
         return oboe::DataCallbackResult::Continue;
     }
 
-    // Output direction: drain the FIFO, zero-fill on underrun.
-    auto *out = static_cast<float *>(audioData);
-    int readIdx = fifoRead_.load(std::memory_order_relaxed);
-    const int writeIdx = fifoWrite_.load(std::memory_order_acquire);
-    for (int i = 0; i < sampleCount; ++i) {
-        if (readIdx == writeIdx) {
-            out[i] = 0.0f;  // underrun
-        } else {
-            out[i] = fifo_[static_cast<size_t>(readIdx)];
-            readIdx = (readIdx + 1) % fifoCapacity_;
-        }
+    // inputData is read-only (it is FullDuplexStream's own internal
+    // buffer), so copy it into our preallocated scratch buffer to run the
+    // DSP chain in place.
+    const int frames = numInputFrames;
+    const int inSamples = frames * channelCount_;
+    const auto *in = static_cast<const float *>(inputData);
+    float *buf = scratch_.data();
+    std::copy(in, in + inSamples, buf);
+
+    runDsp(buf, frames);
+
+    std::copy(buf, buf + inSamples, out);
+    if (numOutputFrames > frames) {
+        std::fill(out + inSamples, out + outSamples, 0.0f);
     }
-    fifoRead_.store(readIdx, std::memory_order_release);
     return oboe::DataCallbackResult::Continue;
 }
 
-void AudioEngine::onErrorAfterClose(oboe::AudioStream *stream,
+void AudioEngine::onErrorAfterClose(oboe::AudioStream * /*stream*/,
                                     oboe::Result error) {
-    LOGE("Stream error after close: %s", oboe::convertToText(error));
-    std::lock_guard<std::mutex> lock(lifecycleLock_);
-    running_.store(false);
-    // The errored stream is already closed by Oboe; stop and close the partner
-    // stream too so it does not keep running against a dead counterpart.
-    if (inputStream_ && inputStream_.get() != stream) {
-        inputStream_->requestStop();
-        inputStream_->close();
+    // Under the FullDuplexStream contract this fires only for the output
+    // stream, which Oboe has already stopped+closed by the time we get here.
+    LOGE("Output stream error after close: %s", oboe::convertToText(error));
+
+    uint64_t myGeneration;
+    bool shouldRestart;
+    {
+        std::lock_guard<std::mutex> lock(lifecycleLock_);
+        if (!running_.load()) return;  // already stopped/superseded
+        myGeneration = generation_.load();
+
+        outputStream_.reset();
+        duplex_.setOutputStream(nullptr);
+        // We own stopping/closing the input stream, the errored output's
+        // now-dead partner.
+        if (inputStream_) {
+            inputStream_->requestStop();
+            inputStream_->close();
+            inputStream_.reset();
+        }
+        duplex_.setInputStream(nullptr);
+
+        shouldRestart = (error == oboe::Result::ErrorDisconnected);
+        if (!shouldRestart) {
+            // Not a routing change we can recover from transparently: stop
+            // for real so the UI's 'state' running:false event fires.
+            running_.store(false);
+        }
     }
-    if (outputStream_ && outputStream_.get() != stream) {
-        outputStream_->requestStop();
-        outputStream_->close();
-    }
-    inputStream_.reset();
-    outputStream_.reset();
+    if (!shouldRestart) return;
+
+    // Disconnect (headset/BT plug event): restart from a separate thread
+    // with a short debounce so the reopen doesn't race a route that's still
+    // settling. `running_` is left true throughout so the engine's
+    // externally-visible state never flaps for a transparent reconnect --
+    // only a real stop()/failed-restart flips it to false.
+    std::thread([this, myGeneration]() {
+        std::this_thread::sleep_for(kRestartDebounce);
+        std::lock_guard<std::mutex> lock(lifecycleLock_);
+        // Ignore late/stale restarts: a newer start()/stop() (or this
+        // thread losing a race to another one) already moved the engine
+        // past this generation.
+        if (myGeneration != generation_.load() || !running_.load()) return;
+        if (!openStreams()) {
+            LOGE("Restart after disconnect failed");
+            closeStreams();
+            running_.store(false);
+        } else {
+            generation_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }).detach();
 }

@@ -4,18 +4,28 @@
 
 #include "audio_engine.h"
 
-// Single process-wide engine instance shared by all JNI calls.
+// Single process-wide engine instance shared by all JNI calls. Created
+// eagerly in JNI_OnLoad (which System.loadLibrary() runs synchronously
+// before any native method can be invoked) so that setters called before the
+// first nativeStart() are not silently dropped -- the engine buffers every
+// parameter on its own atomics/control-thread state regardless of whether
+// the Oboe streams are open yet.
 static std::unique_ptr<AudioEngine> gEngine;
 
 extern "C" {
 
 JNIEXPORT jint JNI_OnLoad(JavaVM * /*vm*/, void * /*reserved*/) {
+    if (!gEngine) {
+        gEngine = std::make_unique<AudioEngine>();
+    }
     return JNI_VERSION_1_6;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeStart(JNIEnv * /*env*/,
                                                               jobject /*thiz*/) {
+    // Defensive fallback: JNI_OnLoad should always have run first, but avoid
+    // ever dereferencing a null engine if that assumption is ever violated.
     if (!gEngine) {
         gEngine = std::make_unique<AudioEngine>();
     }

@@ -2,6 +2,7 @@
 #define ECHOMIC_AUDIO_ENGINE_H
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 
@@ -17,17 +18,23 @@
 #include "feedback_suppressor.h"
 
 /**
- * Full-duplex low-latency engine built on two Oboe streams.
+ * Full-duplex low-latency engine built on Oboe's FullDuplexStream helper.
  *
- * The input stream is the master clock: its data callback reads the mic,
- * runs gain + echo, and writes the processed audio into a lock-free FIFO that
- * the output stream drains. Both streams request AAudio LowLatency + Exclusive
- * Float so the framework can pick the fast mixer path.
+ * The output stream is the master clock: oboe::FullDuplexStream's own
+ * onAudioReady() drives the whole thing -- it drains/primes the input
+ * stream's internal buffer against the output callback's cadence and then
+ * hands both buffers to onBothStreamsReady(), which is where the DSP chain
+ * runs in place before the result is copied to the output buffer. The input
+ * stream itself has no data callback; FullDuplexStream reads it with a
+ * non-blocking read() from inside the output callback.
+ *
+ * Both streams request AAudio LowLatency + Exclusive Float so the framework
+ * can pick the fast mixer path, with Oboe's built-in automatic fallback to
+ * Shared mode if Exclusive isn't available on the device.
  */
-class AudioEngine : public oboe::AudioStreamDataCallback,
-                    public oboe::AudioStreamErrorCallback {
+class AudioEngine : public oboe::AudioStreamErrorCallback {
 public:
-    AudioEngine() = default;
+    AudioEngine();
     ~AudioEngine() override;
 
     bool start();
@@ -45,17 +52,40 @@ public:
     float getRmsLevel() const         { return rmsLevel_.load(); }
     bool isRunning() const            { return running_.load(); }
 
-    // oboe::AudioStreamDataCallback
-    oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream,
-                                          void *audioData,
-                                          int32_t numFrames) override;
-
-    // oboe::AudioStreamErrorCallback
+    // oboe::AudioStreamErrorCallback (registered on the output stream only;
+    // FullDuplexStream's contract is that the caller stops/closes the input
+    // stream and, for ErrorDisconnected, reopens both streams).
     void onErrorAfterClose(oboe::AudioStream *stream, oboe::Result error) override;
 
 private:
+    // oboe::FullDuplexStream itself declares virtual start()/stop() methods
+    // (returning oboe::Result) that would collide with AudioEngine's own
+    // differently-typed, JNI-facing start()/stop() if AudioEngine inherited
+    // it directly (same name+params, incompatible return type -> a hard
+    // compile error, not just shadowing). So it is held as a member instead,
+    // the same composition Google's own LiveEffect sample uses
+    // (LiveEffectEngine holds a FullDuplexPass rather than inheriting it).
+    class DuplexProcessor : public oboe::FullDuplexStream {
+    public:
+        explicit DuplexProcessor(AudioEngine *engine) : engine_(engine) {}
+        oboe::DataCallbackResult onBothStreamsReady(const void *inputData,
+                                                     int numInputFrames,
+                                                     void *outputData,
+                                                     int numOutputFrames) override;
+
+    private:
+        AudioEngine *engine_;
+    };
+
     bool openStreams();
     void closeStreams();
+    void runDsp(float *buf, int numFrames);
+    oboe::DataCallbackResult processBothStreamsReady(const void *inputData,
+                                                      int numInputFrames,
+                                                      void *outputData,
+                                                      int numOutputFrames);
+
+    DuplexProcessor duplex_;
 
     std::shared_ptr<oboe::AudioStream> inputStream_;
     std::shared_ptr<oboe::AudioStream> outputStream_;
@@ -71,21 +101,26 @@ private:
     std::atomic<float> masterGain_{1.0f};
     std::atomic<float> rmsLevel_{0.0f};
     std::atomic<float> gain_{1.0f};
-    // false = no amplification: input gain pinned to 1.0 and compressor makeup off.
+    // false = no amplification: input gain pinned to 1.0 and compressor bypassed entirely.
     std::atomic<bool> boost_{true};
 
-    // Lock-free single-producer/single-consumer ring buffer of float samples
-    // carrying processed audio from the input callback to the output callback.
-    std::vector<float> fifo_;
-    int fifoCapacity_ = 0;          // in samples
-    std::atomic<int> fifoWrite_{0};
-    std::atomic<int> fifoRead_{0};
+    // Scratch buffer the DSP chain processes in place before it is copied to
+    // the (read-only, from our side) output buffer. Sized once in
+    // openStreams() to the output stream's buffer capacity -- never resized
+    // on the audio thread.
+    std::vector<float> scratch_;
 
     int channelCount_ = 1;
     int sampleRate_ = 48000;
 
     std::mutex lifecycleLock_;
     std::atomic<bool> running_{false};
+
+    // Bumped on every start()/stop() and successful reconnect so a debounced
+    // restart thread (or a stale/late error callback from an already-replaced
+    // stream pair) can recognize it is no longer relevant and bail out
+    // instead of acting on a torn-down engine.
+    std::atomic<uint64_t> generation_{0};
 };
 
 #endif  // ECHOMIC_AUDIO_ENGINE_H

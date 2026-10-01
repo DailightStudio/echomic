@@ -26,7 +26,10 @@ public:
     }
 
     // Call BEFORE EchoEffect. Compresses and applies makeup gain in-place.
-    // applyMakeup=false: compress only (no +12 dB boost) — the "no boost" mode.
+    // Callers implement "boost off" by not calling process() at all (bypass
+    // the compressor entirely, gain 1.0) rather than via applyMakeup=false,
+    // so no envelope-follower gain reduction runs either; applyMakeup stays
+    // available for callers that do want compression without the makeup gain.
     void process(float* samples, int numFrames, int numChannels, bool applyMakeup) {
         const float makeup = applyMakeup ? makeupLinear_ : 1.0f;
         for (int f = 0; f < numFrames; ++f) {
