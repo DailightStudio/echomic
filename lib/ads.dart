@@ -76,16 +76,24 @@ class AdBanner extends StatefulWidget {
 class _AdBannerState extends State<AdBanner> {
   BannerAd? _ad;
   AdSize? _size;
+  bool _requested = false;
   bool _loaded = false;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_ad == null) _load();
+    // One request per screen. _ad is only set after several awaits, so checking
+    // it here let a second didChangeDependencies start a second request; the
+    // first frame also reports width 0 on Android, and that request failed
+    // ("doesn't meet size requirements") and could clear the good one's slot.
+    if (_requested) return;
+    final width = MediaQuery.sizeOf(context).width.truncate();
+    if (width <= 0) return; // runs again when the window metrics arrive
+    _requested = true;
+    _load(width);
   }
 
-  Future<void> _load() async {
-    final width = MediaQuery.of(context).size.width.truncate();
+  Future<void> _load(int width) async {
     await Ads.init();
     if (!mounted || !await ConsentInformation.instance.canRequestAds()) return;
     final size = await AdSize.getLargeAnchoredAdaptiveBannerAdSize(width);
@@ -100,6 +108,7 @@ class _AdBannerState extends State<AdBanner> {
         onAdFailedToLoad: (ad, err) {
           debugPrint('banner failed: $err');
           ad.dispose();
+          _ad = null;
           if (mounted) setState(() => _size = null);
         },
       ),
