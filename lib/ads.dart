@@ -65,7 +65,7 @@ class Ads {
 /// Anchored adaptive banner pinned under the Start button. Reserves its slot as
 /// soon as the size is known, before the ad arrives: if the slot appeared on
 /// load, the Start button would jump up under a thumb already on its way and the
-/// tap would land on the ad. A failed load gives the slot back.
+/// tap would land on the ad. It keeps the slot for the screen's life.
 class AdBanner extends StatefulWidget {
   const AdBanner({super.key});
 
@@ -78,6 +78,7 @@ class _AdBannerState extends State<AdBanner> {
   AdSize? _size;
   bool _requested = false;
   bool _loaded = false;
+  Timer? _retry;
 
   @override
   void didChangeDependencies() {
@@ -99,6 +100,13 @@ class _AdBannerState extends State<AdBanner> {
     final size = await AdSize.getLargeAnchoredAdaptiveBannerAdSize(width);
     if (!mounted || size == null) return;
     setState(() => _size = size);
+    _request(size);
+  }
+
+  // A failed load (no-fill is common) keeps the slot and tries again later.
+  // Giving the slot back would move the Start button under the user's thumb,
+  // the jump the slot exists to prevent.
+  void _request(AdSize size) {
     _ad = BannerAd(
       adUnitId: Ads.bannerUnitId,
       size: size,
@@ -109,14 +117,17 @@ class _AdBannerState extends State<AdBanner> {
           debugPrint('banner failed: $err');
           ad.dispose();
           _ad = null;
-          if (mounted) setState(() => _size = null);
+          if (mounted) _retry = Timer(_retryAfter, () => _request(size));
         },
       ),
     )..load();
   }
 
+  static const _retryAfter = Duration(seconds: 60);
+
   @override
   void dispose() {
+    _retry?.cancel();
     _ad?.dispose();
     super.dispose();
   }
