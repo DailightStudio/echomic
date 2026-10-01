@@ -41,15 +41,15 @@ class _HomeScreenState extends State<HomeScreen> {
   double _echoDelayMs = _kPresetDelayMs;
   double _echoFeedback = _kPresetFeedback;
   double _reverbMix = _kPresetReverb;
-  double _masterVolume = 0.8;
+  double _masterVolume = 1.0;
   double _gateThresholdDb = -40.0;
-  final List<double> _eqGains = [-4.0, -2.0, 0.0, -4.0, 2.0]; // dB per band
+  final List<double> _eqGains = [0.0, 0.0, 0.0, 0.0, 0.0]; // dB per band
   bool _freqShiftEnabled = false;
   double _rmsLevel = 0.0; // 0.0~1.0 선형
   StreamSubscription? _eventSub;
 
-  DateTime? _lastParamSend;
-  Timer? _pendingSend;
+  final Map<String, DateTime> _lastParamSend = {};
+  final Map<String, Timer> _pendingSend = {};
 
   @override
   void initState() {
@@ -62,11 +62,19 @@ class _HomeScreenState extends State<HomeScreen> {
           if (!mounted) return;
           final type = event['type'] as String?;
           if (type == 'level') {
-            setState(() => _rmsLevel =
-                (event['rms'] as double? ?? 0.0).clamp(0.0, 1.0));
+            final rms = (event['rms'] as double? ?? 0.0).clamp(0.0, 1.0);
+            if ((rms - _rmsLevel).abs() > 0.005) setState(() => _rmsLevel = rms);
           } else if (type == 'state') {
             final running = event['running'] as bool? ?? false;
-            if (!running && _running) {
+            if (running && !_running) {
+              WakelockPlus.enable();
+              _sessionStart ??= DateTime.now();
+              setState(() {
+                _running = true;
+                _status = '실행 중 (저지연)';
+              });
+            } else if (!running && _running) {
+              _engine.stop(); // make sure nothing is left capturing
               WakelockPlus.disable();
               setState(() {
                 _running = false;
@@ -91,7 +99,9 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _eventSub?.cancel();
-    _pendingSend?.cancel();
+    for (final t in _pendingSend.values) {
+      t.cancel();
+    }
     super.dispose();
   }
 
@@ -99,13 +109,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final p = await SharedPreferences.getInstance();
     setState(() {
       _boostEnabled = p.getBool('boost') ?? false;
-      _gain = p.getDouble('gain') ?? 2.0;
+      _gain = (p.getDouble('gain') ?? 2.0).clamp(1.0, 4.0);
       _echoDelayMs = p.getDouble('echoDelayMs') ?? _kPresetDelayMs;
       _echoFeedback = p.getDouble('echoFeedback') ?? _kPresetFeedback;
       _reverbMix = p.getDouble('reverbMix') ?? _kPresetReverb;
-      _masterVolume = p.getDouble('masterVolume') ?? 0.8;
+      _masterVolume = p.getDouble('masterVolume') ?? 1.0;
       _gateThresholdDb = p.getDouble('gateThresholdDb') ?? -40.0;
-      const eqDefaults = [-4.0, -2.0, 0.0, -4.0, 2.0];
+      const eqDefaults = [0.0, 0.0, 0.0, 0.0, 0.0];
       for (int i = 0; i < 5; i++) {
         _eqGains[i] = p.getDouble('eq$i') ?? eqDefaults[i];
       }
@@ -143,16 +153,18 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Throttled, but the LAST value always goes out (trailing send), so the native
   // value ends equal to what the slider shows.
-  void _sendParam(VoidCallback send) {
+  void _sendParam(String key, VoidCallback send) {
     const window = Duration(milliseconds: 50);
     final now = DateTime.now();
-    _pendingSend?.cancel();
-    if (_lastParamSend == null || now.difference(_lastParamSend!) > window) {
-      _lastParamSend = now;
+    _pendingSend.remove(key)?.cancel();
+    final last = _lastParamSend[key];
+    if (last == null || now.difference(last) > window) {
+      _lastParamSend[key] = now;
       send();
     } else {
-      _pendingSend = Timer(window, () {
-        _lastParamSend = DateTime.now();
+      _pendingSend[key] = Timer(window, () {
+        _lastParamSend[key] = DateTime.now();
+        _pendingSend.remove(key);
         send();
       });
     }
@@ -270,7 +282,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 valueLabel: '${_echoDelayMs.round()} ms',
                 onChanged: (v) {
                   setState(() => _echoDelayMs = v);
-                  _sendParam(() => _engine.setEchoDelay(v));
+                  _sendParam('echoDelay', () => _engine.setEchoDelay(v));
                 },
                 onChangeEnd: (_) => _savePrefs(),
               ),
@@ -282,7 +294,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 valueLabel: '${(_echoFeedback * 100).round()}%',
                 onChanged: (v) {
                   setState(() => _echoFeedback = v);
-                  _sendParam(() => _engine.setEchoFeedback(v));
+                  _sendParam('echoFeedback', () => _engine.setEchoFeedback(v));
                 },
                 onChangeEnd: (_) => _savePrefs(),
               ),
@@ -294,7 +306,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 valueLabel: '${(_reverbMix * 100).round()}%',
                 onChanged: (v) {
                   setState(() => _reverbMix = v);
-                  _sendParam(() => _engine.setReverbMix(v));
+                  _sendParam('reverb', () => _engine.setReverbMix(v));
                 },
                 onChangeEnd: (_) => _savePrefs(),
               ),
@@ -306,7 +318,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 valueLabel: '${(_masterVolume * 100).round()}%',
                 onChanged: (v) {
                   setState(() => _masterVolume = v);
-                  _sendParam(() => _engine.setMasterVolume(v));
+                  _sendParam('master', () => _engine.setMasterVolume(v));
                 },
                 onChangeEnd: (_) => _savePrefs(),
               ),
@@ -335,7 +347,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     label: '증폭 크기',
                     value: _gain,
                     min: 1.0,
-                    max: 8.0,
+                    max: 4.0, // native caps gain at 4x (8x clipped through the limiter)
                     valueLabel: _boostEnabled
                         ? '${_gain.toStringAsFixed(1)}배'
                         : '1.0배',
@@ -343,7 +355,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     onChanged: _boostEnabled
                         ? (v) {
                             setState(() => _gain = v);
-                            _sendParam(() => _engine.setGain(v));
+                            _sendParam('gain', () => _engine.setGain(v));
                           }
                         : null,
                     onChangeEnd: (_) => _savePrefs(),
@@ -356,7 +368,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     valueLabel: '${_gateThresholdDb.round()} dB',
                     onChanged: (v) {
                       setState(() => _gateThresholdDb = v);
-                      _sendParam(() => _engine.setGateThreshold(v));
+                      _sendParam('gate', () => _engine.setGateThreshold(v));
                     },
                     onChangeEnd: (_) => _savePrefs(),
                   ),
@@ -372,7 +384,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           '${_eqGains[band] > 0 ? '+' : ''}${_eqGains[band].round()} dB',
                       onChanged: (v) {
                         setState(() => _eqGains[band] = v);
-                        _sendParam(() => _engine.setEQBand(band, v));
+                        _sendParam('eq$band', () => _engine.setEQBand(band, v));
                       },
                       onChangeEnd: (_) => _savePrefs(),
                     ),
