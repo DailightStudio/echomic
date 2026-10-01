@@ -1,8 +1,6 @@
 package com.dailightstudio.echomic
 
 import android.content.Context
-import android.content.Intent
-import android.os.Build
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -48,7 +46,6 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         stopPolling()
         eventSink = null
         nativeStop()
-        stopForegroundService()
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -56,13 +53,11 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
             "start" -> {
                 val ok = nativeStart()
                 expectedRunning = ok
-                if (ok) startForegroundService()
                 result.success(ok)
             }
             "stop" -> {
                 nativeStop()
                 expectedRunning = false
-                stopForegroundService()
                 result.success(null)
             }
             "setGain" -> {
@@ -141,20 +136,6 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private fun stopPolling() {
         pollingHandler?.removeCallbacksAndMessages(null)
         pollingHandler = null
-    }
-
-    // --- Foreground-service lifecycle (mirrors native start/stop 1:1) ---
-    private fun startForegroundService() {
-        val intent = Intent(appContext, EchoMicForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            appContext.startForegroundService(intent)
-        } else {
-            appContext.startService(intent)
-        }
-    }
-
-    private fun stopForegroundService() {
-        appContext.stopService(Intent(appContext, EchoMicForegroundService::class.java))
     }
 
     // --- JNI entry points implemented in jni_bridge.cpp ---
