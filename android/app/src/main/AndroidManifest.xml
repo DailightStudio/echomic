@@ -17,7 +17,7 @@
         android:required="false" />
 
     <application
-        android:label="echomic"
+        android:label="에코마이크"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
