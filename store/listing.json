@@ -14,9 +14,9 @@
   "privacy_url": "https://dailightstudio.github.io/echomic/privacy.html",
   "contact_email": "wjs9280@gmail.com",
   "copyright": "2026 Dailight Studio",
-  "version": "1.0.1",
-  "release_notes": "화면 아래에 광고 배너가 추가되었습니다.",
-  "ios_whats_new": "",
+  "version": "1.0.2",
+  "release_notes": "뒤로가기로 음악 앱에 가도 목소리가 끊기지 않게 고쳤습니다. 이어폰을 빼면 스피커 하울링 없이 멈춥니다. 기본 음량을 원음 크기로 맞추고 증폭 시 소리 찢어짐을 없앴습니다.",
+  "ios_whats_new": "뒤로가기로 음악 앱에 가도 목소리가 끊기지 않게 고쳤습니다. 이어폰을 빼면 스피커 하울링 없이 멈춥니다. 기본 음량을 원음 크기로 맞추고 증폭 시 소리 찢어짐을 없앴습니다.",
   "ios_category": "MUSIC",
   "territories": [
     "KOR"
