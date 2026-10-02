@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -26,6 +27,7 @@ String _signedDb(double db) {
 
 const String _kStartFailed =
     '마이크를 시작하지 못했습니다. 마이크를 쓰는 다른 앱을 닫고 다시 시작해 주세요.';
+const String _kBackgroundHint = '앱 화면을 연 채로 시작을 눌러 주세요.';
 const String _kRestartHint = '오디오 상태를 받지 못했습니다. 앱을 닫았다가 다시 열어 주세요.';
 
 class HomeScreen extends StatefulWidget {
@@ -76,7 +78,10 @@ class _HomeScreenState extends State<HomeScreen> {
             if ((rms - _rmsLevel).abs() > 0.005) setState(() => _rmsLevel = rms);
           } else if (type == 'state') {
             final running = event['running'] as bool? ?? false;
-            final byUser = event['reason'] == 'user'; // 정지 in the notification
+            final reason = event['reason'] as String?;
+            // 정지 in the notification. No interstitial for it: the app may
+            // be in the background, and a full-screen ad there breaks policy.
+            final byUser = reason == 'user';
             if (running && !_running) {
               WakelockPlus.enable();
               _sessionStart ??= DateTime.now();
@@ -90,8 +95,13 @@ class _HomeScreenState extends State<HomeScreen> {
               WakelockPlus.disable();
               setState(() {
                 _running = false;
+                _sessionStart = null;
                 _status = byUser ? '정지됨' : '멈춤';
-                _hint = byUser ? null : '이어폰 연결이나 전화 때문에 멈췄습니다. 다시 시작해 주세요.';
+                _hint = byUser
+                    ? null
+                    : reason == 'background'
+                        ? _kBackgroundHint
+                        : '이어폰 연결이나 전화 때문에 멈췄습니다. 다시 시작해 주세요.';
               });
             }
           }
@@ -200,6 +210,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _hint = null;
         });
         final started = _sessionStart;
+        _sessionStart = null;
         if (started != null) {
           StopInterstitial.maybeShow(DateTime.now().difference(started));
         }
@@ -259,6 +270,11 @@ class _HomeScreenState extends State<HomeScreen> {
           _hint = ok ? null : _kStartFailed;
         });
       }
+    } on PlatformException catch (e) when (e.code == 'background') {
+      setState(() {
+        _status = '시작 못 함';
+        _hint = _kBackgroundHint;
+      });
     } catch (e) {
       debugPrint('toggle failed: $e');
       setState(() {
