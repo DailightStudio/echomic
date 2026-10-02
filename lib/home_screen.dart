@@ -270,13 +270,15 @@ class _HomeScreenState extends State<HomeScreen> {
           _hint = ok ? null : _kStartFailed;
         });
       }
-    } on PlatformException catch (e) when (e.code == 'background') {
-      setState(() {
-        _status = '시작 못 함';
-        _hint = _kBackgroundHint;
-      });
     } catch (e) {
       debugPrint('toggle failed: $e');
+      if (e is PlatformException && e.code == 'background') {
+        setState(() {
+          _status = '시작 못 함';
+          _hint = _kBackgroundHint;
+        });
+        return;
+      }
       setState(() {
         _status = _running ? '연결 오류' : '시작 못 함';
         _hint = _running ? _kRestartHint : _kStartFailed;
