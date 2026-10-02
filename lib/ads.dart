@@ -79,6 +79,7 @@ class _AdBannerState extends State<AdBanner> {
   bool _requested = false;
   bool _loaded = false;
   Timer? _retry;
+  int _failures = 0;
 
   @override
   void didChangeDependencies() {
@@ -105,7 +106,9 @@ class _AdBannerState extends State<AdBanner> {
 
   // A failed load (no-fill is common) keeps the slot and tries again later.
   // Giving the slot back would move the Start button under the user's thumb,
-  // the jump the slot exists to prevent.
+  // the jump the slot exists to prevent. Retries back off (1, 2, 4 min), stop
+  // after [_maxRetries], and wait while the app is not on screen: a session
+  // can run in the background for a long time and nobody sees the banner.
   void _request(AdSize size) {
     _ad = BannerAd(
       adUnitId: Ads.bannerUnitId,
@@ -117,13 +120,25 @@ class _AdBannerState extends State<AdBanner> {
           debugPrint('banner failed: $err');
           ad.dispose();
           _ad = null;
-          if (mounted) _retry = Timer(_retryAfter, () => _request(size));
+          if (mounted && _failures < _maxRetries) {
+            _retry = Timer(_retryBase * (1 << _failures++), () => _retryWhenVisible(size));
+          }
         },
       ),
     )..load();
   }
 
-  static const _retryAfter = Duration(seconds: 60);
+  void _retryWhenVisible(AdSize size) {
+    if (!mounted) return;
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      _request(size);
+    } else {
+      _retry = Timer(_retryBase, () => _retryWhenVisible(size));
+    }
+  }
+
+  static const _retryBase = Duration(minutes: 1);
+  static const _maxRetries = 3;
 
   @override
   void dispose() {

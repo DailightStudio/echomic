@@ -52,12 +52,28 @@ class EchoMicForegroundService : Service() {
         // service type on API 29+, and follows Android 14's stricter
         // FGS-type rules on API 34+); on pre-29 it falls back to the
         // 2-arg form automatically.
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        )
+        try {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                buildNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } catch (e: RuntimeException) {
+            // Android 14+ checks the microphone type here, not at
+            // startForegroundService(): the app left the foreground between
+            // the plugin's foreground check and now (milliseconds). There is
+            // no clean way out -- a service started with
+            // startForegroundService() that stops without startForeground()
+            // is crashed by the system (ActiveServices fgRequired) -- so the
+            // point is only to release the mic before that happens.
+            android.util.Log.w("EchoMicFGS", "startForeground refused", e)
+            requested = false
+            stopPending = false
+            onForegroundRefused?.invoke()
+            stopSelf()
+            return START_NOT_STICKY
+        }
         inForeground = true
         if (stopPending) {
             // Stop arrived before we got here. Stopping earlier would have
@@ -78,6 +94,11 @@ class EchoMicForegroundService : Service() {
     private fun finish() {
         stopPending = false
         requested = false
+        // Detach now, not in onDestroy: a Start right after this queues a
+        // fresh instance, and a stop() before onDestroy must not land on this
+        // dying one (it would leave the new one foregrounded with no owner).
+        inForeground = false
+        if (instance === this) instance = null
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -118,19 +139,25 @@ class EchoMicForegroundService : Service() {
         private var requested = false   // start() went out and no stop has completed
         private var stopPending = false // stop() came before startForeground()
 
-        /** Set by the plugin: stop the engine when "정지" is tapped in the shade. */
+        /** Set by the plugin for a session: "정지" tapped in the shade. */
         var onStopFromNotification: (() -> Unit)? = null
 
+        /** Set by the plugin for a session: Android refused startForeground(). */
+        var onForegroundRefused: (() -> Unit)? = null
+
         /**
-         * Throws when Android refuses (app already in the background:
-         * ForegroundServiceStartNotAllowedException on 12+, SecurityException
-         * for the microphone type on 14+). The caller must stop the engine then.
+         * Throws ForegroundServiceStartNotAllowedException (12+) when the app
+         * is already in the background; the caller must stop the engine then.
+         * A later refusal inside startForeground() (14+, microphone type)
+         * arrives through [onForegroundRefused] instead.
          */
         fun start(context: Context) {
-            stopPending = false
             ContextCompat.startForegroundService(
                 context, Intent(context, EchoMicForegroundService::class.java)
             )
+            // Only once the request is out: if it threw, an earlier instance
+            // still waiting to go foreground must keep its pending stop.
+            stopPending = false
             requested = true
         }
 
