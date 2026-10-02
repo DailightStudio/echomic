@@ -26,6 +26,7 @@ import androidx.core.content.ContextCompat
 class EchoMicForegroundService : Service() {
 
     private var inForeground = false
+    private var lastStartId = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -40,10 +41,15 @@ class EchoMicForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A Start right after a stop can land on this same instance before it
+        // is destroyed (Android reuses it; seen as lastStartId=2 in dumpsys),
+        // so re-attach on every command, not only in onCreate.
+        instance = this
+        lastStartId = startId
         if (intent?.action == ACTION_STOP) {
             // "정지" on the notification: the plugin stops the engine, which
             // calls back into stop() and ends this service.
-            onStopFromNotification?.invoke() ?: stopSelf()
+            onStopFromNotification?.invoke() ?: stopSelfResult(startId)
             return START_NOT_STICKY
         }
 
@@ -94,13 +100,14 @@ class EchoMicForegroundService : Service() {
     private fun finish() {
         stopPending = false
         requested = false
-        // Detach now, not in onDestroy: a Start right after this queues a
-        // fresh instance, and a stop() before onDestroy must not land on this
-        // dying one (it would leave the new one foregrounded with no owner).
+        // Not foreground any more, so a stop() from here on is held as
+        // pending until the next start command (on this instance or a new one)
+        // instead of acting on this one.
         inForeground = false
-        if (instance === this) instance = null
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        // Only if no newer start arrived meanwhile: plain stopSelf() would
+        // also cancel a Start that is already queued for this instance.
+        stopSelfResult(lastStartId)
     }
 
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
