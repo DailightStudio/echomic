@@ -27,6 +27,7 @@ String _signedDb(double db) {
 
 const String _kStartFailed =
     '마이크를 시작하지 못했습니다. 마이크를 쓰는 다른 앱을 닫고 다시 시작해 주세요.';
+const int _kHeadsetHintSessions = 3;
 const String _kBackgroundHint = '앱 화면을 연 채로 시작을 눌러 주세요.';
 const String _kRestartHint = '오디오 상태를 받지 못했습니다. 앱을 닫았다가 다시 열어 주세요.';
 
@@ -47,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // what to do, below it, where it can wrap at any font size.
   String _status = '대기 중';
   String? _hint;
+  int _startCount = 0; // sessions started so far, for the one-time headset hint
 
   bool _boostEnabled = false;
   double _gain = 2.0;
@@ -135,6 +137,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadPrefs() async {
     final p = await SharedPreferences.getInstance();
     setState(() {
+      _startCount = p.getInt('startCount') ?? 0;
       _boostEnabled = p.getBool('boost') ?? false;
       _gain = (p.getDouble('gain') ?? 2.0).clamp(1.0, 4.0);
       _echoDelayMs = p.getDouble('echoDelayMs') ?? _kPresetDelayMs;
@@ -152,6 +155,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _savePrefs() async {
     final p = await SharedPreferences.getInstance();
+    await p.setInt('startCount', _startCount);
     await p.setBool('boost', _boostEnabled);
     await p.setDouble('gain', _gain);
     await p.setDouble('echoDelayMs', _echoDelayMs);
@@ -237,8 +241,11 @@ class _HomeScreenState extends State<HomeScreen> {
         // Android stops showing the dialog by itself after two denials.
         if (Platform.isAndroid) await Permission.notification.request();
 
-        // 스피커 경고
-        if (mounted) {
+        // Headset advice for the first few sessions only: after that it is
+        // noise at the moment the user wants to sing.
+        if (mounted && _startCount < _kHeadsetHintSessions) {
+          _startCount++;
+          _savePrefs();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('스피커로 쓰면 하울링이 생길 수 있습니다. 이어폰을 권장합니다.'),
@@ -526,12 +533,17 @@ class _SliderTile extends StatelessWidget {
             Text(valueLabel, style: Theme.of(context).textTheme.titleSmall),
           ],
         ),
-        Slider(
-          value: value,
-          min: min,
-          max: max,
-          onChanged: onChanged,
-          onChangeEnd: onChangeEnd,
+        // TalkBack otherwise reads a bare "slider, 35%" with no name.
+        Semantics(
+          label: label,
+          value: valueLabel,
+          child: Slider(
+            value: value,
+            min: min,
+            max: max,
+            onChanged: onChanged,
+            onChangeEnd: onChangeEnd,
+          ),
         ),
       ],
     );
@@ -567,6 +579,7 @@ class _LevelMeter extends StatelessWidget {
             child: LinearProgressIndicator(
               value: fraction,
               minHeight: 10,
+              semanticsLabel: '입력 소리',
               backgroundColor:
                   Theme.of(context).colorScheme.surfaceContainerHighest,
               valueColor: AlwaysStoppedAnimation<Color>(color),
