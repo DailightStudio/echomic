@@ -1,11 +1,11 @@
 package com.dailightstudio.echomic
 
+import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioManager
-import android.os.Build
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
@@ -58,27 +58,38 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         eventChannel.setStreamHandler(null)
         stopPolling()
         eventSink = null
-        nativeStop()
-        stopForegroundService()
-        unregisterNoisyReceiver()
+        endSession()
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
             "start" -> {
+                // Start tapped, then the app left before Dart's setters
+                // finished: Android would refuse the microphone FGS, and the
+                // mic must not run without it. Say so instead of "failed".
+                if (!inForeground()) {
+                    result.error(ERR_BACKGROUND, "app is not in the foreground", null)
+                    return
+                }
                 val ok = nativeStart()
-                expectedRunning = ok
                 if (ok) {
-                    startForegroundService()
+                    try {
+                        EchoMicForegroundService.start(appContext)
+                    } catch (e: Exception) {
+                        android.util.Log.w("AudioEnginePlugin", "mic FGS refused", e)
+                        nativeStop()
+                        result.error(ERR_BACKGROUND, "foreground service refused", null)
+                        return
+                    }
+                    expectedRunning = true
+                    EchoMicForegroundService.onStopFromNotification = { endSession(reason = "user") }
+                    EchoMicForegroundService.onForegroundRefused = { endSession(reason = ERR_BACKGROUND) }
                     registerNoisyReceiver()
                 }
                 result.success(ok)
             }
             "stop" -> {
-                nativeStop()
-                expectedRunning = false
-                stopForegroundService()
-                unregisterNoisyReceiver()
+                endSession()
                 result.success(null)
             }
             "setGain" -> {
@@ -140,13 +151,10 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 val running = nativeIsRunning()
                 // 상태 변화 감지: 시작을 기대했으나 엔진이 멈춘 경우
                 if (expectedRunning && !running) {
-                    sink.success(mapOf("type" to "state", "running" to false))
-                    expectedRunning = false
                     // Native died on its own (e.g. a failed input read/
                     // reconnect) without going through stop(): the FGS
                     // notification would otherwise outlive the engine.
-                    stopForegroundService()
-                    unregisterNoisyReceiver()
+                    endSession(reason = "interrupted")
                 }
                 // 레벨 이벤트
                 if (running) {
@@ -164,18 +172,27 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         pollingHandler = null
     }
 
-    // --- Foreground-service lifecycle (mirrors native start/stop 1:1) ---
-    private fun startForegroundService() {
-        val intent = Intent(appContext, EchoMicForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            appContext.startForegroundService(intent)
-        } else {
-            appContext.startService(intent)
+    /**
+     * The one way a session ends: engine, foreground service, noisy receiver.
+     * [reason] non-null tells Dart it ended without Dart asking
+     * ("user" = 정지 in the notification, "interrupted" = unplug/engine death).
+     */
+    private fun endSession(reason: String? = null) {
+        nativeStop()
+        expectedRunning = false
+        EchoMicForegroundService.onStopFromNotification = null
+        EchoMicForegroundService.onForegroundRefused = null
+        EchoMicForegroundService.stop()
+        unregisterNoisyReceiver()
+        if (reason != null) {
+            eventSink?.success(mapOf("type" to "state", "running" to false, "reason" to reason))
         }
     }
 
-    private fun stopForegroundService() {
-        appContext.stopService(Intent(appContext, EchoMicForegroundService::class.java))
+    private fun inForeground(): Boolean {
+        val info = ActivityManager.RunningAppProcessInfo()
+        ActivityManager.getMyMemoryState(info)
+        return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
     }
 
     // --- Stop before the route falls back to the speaker (fix: unplug-> howl) ---
@@ -183,11 +200,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         if (noisyReceiver != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                nativeStop()
-                expectedRunning = false
-                stopForegroundService()
-                unregisterNoisyReceiver()
-                eventSink?.success(mapOf("type" to "state", "running" to false))
+                endSession(reason = "interrupted")
             }
         }
         ContextCompat.registerReceiver(
@@ -224,6 +237,10 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     companion object {
         private const val CHANNEL = "com.dailightstudio.echomic/audio"
         private const val EVENT_CHANNEL = "com.dailightstudio.echomic/events"
+
+        // Start refused because the app is not in the foreground. Also the
+        // 'state' event reason when Android refuses startForeground() later.
+        private const val ERR_BACKGROUND = "background"
 
         init {
             System.loadLibrary("echomic_engine")

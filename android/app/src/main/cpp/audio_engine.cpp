@@ -184,20 +184,25 @@ bool AudioEngine::openStreams() {
 }
 
 void AudioEngine::closeStreams() {
-    if (inputStream_) {
-        inputStream_->requestStop();
-        inputStream_->close();
-        inputStream_.reset();
-    }
+    // Output first: it owns the data callback, and FullDuplexStream's
+    // onAudioReady() reads -- and on error requestStop()s -- the input
+    // stream. Closing input first left that callback running on a closed,
+    // freed input; the callback blocked on the dead stream's lock while
+    // close() on the output waited to join it (ANR seen on the emulator,
+    // main thread in AudioTrack::stopAndJoinCallbacks). Same order as Oboe's
+    // LiveEffect sample.
     if (outputStream_) {
         outputStream_->requestStop();
         outputStream_->close();
         outputStream_.reset();
     }
-    // Drop FullDuplexStream's own raw pointers so nothing can dereference a
-    // stream we just destroyed.
-    duplex_.setInputStream(nullptr);
     duplex_.setOutputStream(nullptr);
+    if (inputStream_) {
+        inputStream_->requestStop();
+        inputStream_->close();
+        inputStream_.reset();
+    }
+    duplex_.setInputStream(nullptr);
 }
 
 void AudioEngine::runDsp(float *buf, int numFrames) {

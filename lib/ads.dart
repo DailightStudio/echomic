@@ -65,7 +65,7 @@ class Ads {
 /// Anchored adaptive banner pinned under the Start button. Reserves its slot as
 /// soon as the size is known, before the ad arrives: if the slot appeared on
 /// load, the Start button would jump up under a thumb already on its way and the
-/// tap would land on the ad. A failed load gives the slot back.
+/// tap would land on the ad. It keeps the slot for the screen's life.
 class AdBanner extends StatefulWidget {
   const AdBanner({super.key});
 
@@ -78,6 +78,8 @@ class _AdBannerState extends State<AdBanner> {
   AdSize? _size;
   bool _requested = false;
   bool _loaded = false;
+  Timer? _retry;
+  int _failures = 0;
 
   @override
   void didChangeDependencies() {
@@ -99,6 +101,15 @@ class _AdBannerState extends State<AdBanner> {
     final size = await AdSize.getLargeAnchoredAdaptiveBannerAdSize(width);
     if (!mounted || size == null) return;
     setState(() => _size = size);
+    _request(size);
+  }
+
+  // A failed load (no-fill is common) keeps the slot and tries again later.
+  // Giving the slot back would move the Start button under the user's thumb,
+  // the jump the slot exists to prevent. Retries back off (1, 2, 4 min), stop
+  // after [_maxRetries], and wait while the app is not on screen: a session
+  // can run in the background for a long time and nobody sees the banner.
+  void _request(AdSize size) {
     _ad = BannerAd(
       adUnitId: Ads.bannerUnitId,
       size: size,
@@ -109,14 +120,29 @@ class _AdBannerState extends State<AdBanner> {
           debugPrint('banner failed: $err');
           ad.dispose();
           _ad = null;
-          if (mounted) setState(() => _size = null);
+          if (mounted && _failures < _maxRetries) {
+            _retry = Timer(_retryBase * (1 << _failures++), () => _retryWhenVisible(size));
+          }
         },
       ),
     )..load();
   }
 
+  void _retryWhenVisible(AdSize size) {
+    if (!mounted) return;
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      _request(size);
+    } else {
+      _retry = Timer(_retryBase, () => _retryWhenVisible(size));
+    }
+  }
+
+  static const _retryBase = Duration(minutes: 1);
+  static const _maxRetries = 3;
+
   @override
   void dispose() {
+    _retry?.cancel();
     _ad?.dispose();
     super.dispose();
   }
