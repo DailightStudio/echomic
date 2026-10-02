@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -9,10 +10,31 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'ads.dart';
 import 'audio_engine.dart';
 
-// Karaoke preset — also the fresh-install default, so the first Start already sounds like one.
-const double _kPresetDelayMs = 120.0;
-const double _kPresetFeedback = 0.35;
-const double _kPresetReverb = 0.25;
+// Echo/reverb presets. The first one (karaoke) is also the fresh-install
+// default, so the first Start already sounds like one.
+class _Preset {
+  const _Preset(this.name, this.delayMs, this.feedback, this.reverb);
+  final String name;
+  final double delayMs;
+  final double feedback;
+  final double reverb;
+}
+
+const List<_Preset> _kPresets = [
+  _Preset('노래방', 120.0, 0.35, 0.25),
+  _Preset('콘서트홀', 220.0, 0.25, 0.6),
+  _Preset('동굴', 380.0, 0.55, 0.45),
+  _Preset('원음', 0.0, 0.0, 0.0),
+];
+final _Preset _kDefaultPreset = _kPresets.first;
+
+// Advanced-settings defaults, restored by the reset button.
+const bool _kDefaultBoost = false;
+const double _kDefaultGain = 2.0;
+const double _kDefaultGateDb = -40.0;
+const bool _kDefaultFreqShift = false;
+
+const String _kGuideShownKey = 'guideShown';
 
 // EQ bands, low to high: 100 Hz, 400 Hz, 1 kHz, 3 kHz, 8 kHz (native order).
 const List<String> _kEqBands = ['저음', '중저음', '중음', '중고음', '고음'];
@@ -20,6 +42,13 @@ const List<String> _kEqBands = ['저음', '중저음', '중음', '중고음', '�
 const String _kStartFailed =
     '마이크를 시작하지 못했습니다. 마이크를 쓰는 다른 앱을 닫고 다시 시작해 주세요.';
 const String _kRestartHint = '오디오 상태를 받지 못했습니다. 앱을 닫았다가 다시 열어 주세요.';
+
+// Why the engine stopped on its own (native 'reason'), in the user's words.
+String _stoppedMessage(String? reason) => switch (reason) {
+      'unplug' => '이어폰이 빠져서 멈췄습니다. 다시 꽂고 시작해 주세요.',
+      'interruption' => '전화나 다른 앱 소리 때문에 멈췄습니다. 다시 시작해 주세요.',
+      _ => '마이크 연결이 끊겨 멈췄습니다. 다시 시작해 주세요.',
+    };
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -37,15 +66,19 @@ class _HomeScreenState extends State<HomeScreen> {
   String _status = '대기 중';
 
   bool _boostEnabled = false;
-  double _gain = 2.0;
-  double _echoDelayMs = _kPresetDelayMs;
-  double _echoFeedback = _kPresetFeedback;
-  double _reverbMix = _kPresetReverb;
+  double _gain = _kDefaultGain;
+  double _echoDelayMs = _kDefaultPreset.delayMs;
+  double _echoFeedback = _kDefaultPreset.feedback;
+  double _reverbMix = _kDefaultPreset.reverb;
   double _masterVolume = 1.0;
-  double _gateThresholdDb = -40.0;
+  double _gateThresholdDb = _kDefaultGateDb;
   final List<double> _eqGains = [0.0, 0.0, 0.0, 0.0, 0.0]; // dB per band
-  bool _freqShiftEnabled = false;
-  double _rmsLevel = 0.0; // 0.0~1.0 선형
+  bool _freqShiftEnabled = _kDefaultFreqShift;
+  // Level updates arrive every 50 ms; only the meter listens so the rest of
+  // the screen (header image filter, ten sliders) is not rebuilt each time.
+  final ValueNotifier<double> _rmsLevel = ValueNotifier(0.0); // 0.0~1.0 선형
+  AudioOutput _output = AudioOutput.other;
+  double? _latencyMs;
   StreamSubscription? _eventSub;
 
   final Map<String, DateTime> _lastParamSend = {};
@@ -63,7 +96,9 @@ class _HomeScreenState extends State<HomeScreen> {
           final type = event['type'] as String?;
           if (type == 'level') {
             final rms = (event['rms'] as double? ?? 0.0).clamp(0.0, 1.0);
-            if ((rms - _rmsLevel).abs() > 0.005) setState(() => _rmsLevel = rms);
+            if ((rms - _rmsLevel.value).abs() > 0.005) _rmsLevel.value = rms;
+          } else if (type == 'route') {
+            _applyRoute(RouteInfo.fromMap(event));
           } else if (type == 'state') {
             final running = event['running'] as bool? ?? false;
             if (running && !_running) {
@@ -71,14 +106,16 @@ class _HomeScreenState extends State<HomeScreen> {
               _sessionStart ??= DateTime.now();
               setState(() {
                 _running = true;
-                _status = '실행 중 (저지연)';
+                _status = _runningStatus();
               });
+              _refreshRoute();
             } else if (!running && _running) {
               _engine.stop(); // make sure nothing is left capturing
               WakelockPlus.disable();
               setState(() {
                 _running = false;
-                _status = '이어폰 연결이나 전화 때문에 멈췄습니다. 다시 시작해 주세요.';
+                _latencyMs = null;
+                _status = _stoppedMessage(event['reason'] as String?);
               });
             }
           }
@@ -99,28 +136,91 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _eventSub?.cancel();
+    _rmsLevel.dispose();
     for (final t in _pendingSend.values) {
       t.cancel();
     }
     super.dispose();
   }
 
+  String _runningStatus() {
+    final ms = _latencyMs;
+    return ms == null ? '실행 중' : '실행 중 · 지연 약 ${ms.round()}ms';
+  }
+
+  void _applyRoute(RouteInfo info) {
+    if (!mounted) return;
+    setState(() {
+      _output = info.output;
+      _latencyMs = info.latencyMs;
+      if (_running) _status = _runningStatus();
+    });
+  }
+
+  Future<void> _refreshRoute() async {
+    try {
+      _applyRoute(await _engine.routeInfo());
+    } catch (e) {
+      debugPrint('routeInfo failed: $e');
+    }
+  }
+
+  // Speaker: howl risk. Bluetooth: the ear hears itself late. Wired: nothing to say.
+  void _showRouteHint() {
+    final text = switch (_output) {
+      AudioOutput.speaker => '스피커로 쓰면 하울링이 생길 수 있습니다. 이어폰을 권장합니다.',
+      AudioOutput.bluetooth => '블루투스 이어폰은 목소리가 늦게 들릴 수 있습니다. 유선 이어폰을 권장합니다.',
+      _ => null,
+    };
+    if (text == null || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  // Shown once, on the first launch: how to actually sing with the app.
+  Future<void> _showFirstRunGuide(SharedPreferences p) async {
+    if (p.getBool(_kGuideShownKey) ?? false) return;
+    await p.setBool(_kGuideShownKey, true);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('이렇게 쓰세요'),
+        content: const Text(
+          '1. 유선 이어폰을 꽂으세요.\n'
+          '2. 시작을 누르고 마이크 권한을 허용하세요.\n'
+          '3. 유튜브나 멜론으로 MR을 틀고 노래하세요.\n\n'
+          '다른 앱으로 넘어가도 목소리는 계속 나옵니다. '
+          '스피커로 쓰면 하울링이 날 수 있습니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('알겠어요'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _loadPrefs() async {
     final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
-      _boostEnabled = p.getBool('boost') ?? false;
-      _gain = (p.getDouble('gain') ?? 2.0).clamp(1.0, 4.0);
-      _echoDelayMs = p.getDouble('echoDelayMs') ?? _kPresetDelayMs;
-      _echoFeedback = p.getDouble('echoFeedback') ?? _kPresetFeedback;
-      _reverbMix = p.getDouble('reverbMix') ?? _kPresetReverb;
+      _boostEnabled = p.getBool('boost') ?? _kDefaultBoost;
+      _gain = (p.getDouble('gain') ?? _kDefaultGain).clamp(1.0, 4.0);
+      _echoDelayMs = p.getDouble('echoDelayMs') ?? _kDefaultPreset.delayMs;
+      _echoFeedback = p.getDouble('echoFeedback') ?? _kDefaultPreset.feedback;
+      _reverbMix = p.getDouble('reverbMix') ?? _kDefaultPreset.reverb;
       _masterVolume = p.getDouble('masterVolume') ?? 1.0;
-      _gateThresholdDb = p.getDouble('gateThresholdDb') ?? -40.0;
-      const eqDefaults = [0.0, 0.0, 0.0, 0.0, 0.0];
+      _gateThresholdDb = p.getDouble('gateThresholdDb') ?? _kDefaultGateDb;
       for (int i = 0; i < 5; i++) {
-        _eqGains[i] = p.getDouble('eq$i') ?? eqDefaults[i];
+        _eqGains[i] = p.getDouble('eq$i') ?? 0.0;
       }
-      _freqShiftEnabled = p.getBool('freqShift') ?? false;
+      _freqShiftEnabled = p.getBool('freqShift') ?? _kDefaultFreqShift;
     });
+    _showFirstRunGuide(p);
   }
 
   Future<void> _savePrefs() async {
@@ -138,16 +238,40 @@ class _HomeScreenState extends State<HomeScreen> {
     await p.setBool('freqShift', _freqShiftEnabled);
   }
 
-  // One-tap karaoke-room sound: short slapback echo with a few repeats + some reverb.
-  void _applyKaraokePreset() {
+  // One tap sets echo length, repeats and reverb together.
+  void _applyPreset(_Preset preset) {
     setState(() {
-      _echoDelayMs = _kPresetDelayMs;
-      _echoFeedback = _kPresetFeedback;
-      _reverbMix = _kPresetReverb;
+      _echoDelayMs = preset.delayMs;
+      _echoFeedback = preset.feedback;
+      _reverbMix = preset.reverb;
     });
     _engine.setEchoDelay(_echoDelayMs);
     _engine.setEchoFeedback(_echoFeedback);
     _engine.setReverbMix(_reverbMix);
+    _savePrefs();
+  }
+
+  bool _isPresetActive(_Preset p) =>
+      _echoDelayMs == p.delayMs && _echoFeedback == p.feedback && _reverbMix == p.reverb;
+
+  // Puts every advanced control back where a fresh install has it.
+  void _resetAdvanced() {
+    setState(() {
+      _boostEnabled = _kDefaultBoost;
+      _gain = _kDefaultGain;
+      _gateThresholdDb = _kDefaultGateDb;
+      for (int i = 0; i < _eqGains.length; i++) {
+        _eqGains[i] = 0.0;
+      }
+      _freqShiftEnabled = _kDefaultFreqShift;
+    });
+    _engine.setBoost(_boostEnabled);
+    _engine.setGain(_gain);
+    _engine.setGateThreshold(_gateThresholdDb);
+    for (int i = 0; i < _eqGains.length; i++) {
+      _engine.setEQBand(i, _eqGains[i]);
+    }
+    _engine.setFrequencyShift(_freqShiftEnabled);
     _savePrefs();
   }
 
@@ -179,6 +303,7 @@ class _HomeScreenState extends State<HomeScreen> {
         WakelockPlus.disable();
         setState(() {
           _running = false;
+          _latencyMs = null;
           _status = '정지됨';
         });
         final started = _sessionStart;
@@ -200,16 +325,6 @@ class _HomeScreenState extends State<HomeScreen> {
           return;
         }
 
-        // 스피커 경고
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('스피커로 쓰면 하울링이 생길 수 있습니다. 이어폰을 권장합니다.'),
-              duration: Duration(seconds: 3),
-            ),
-          );
-        }
-
         await _engine.setBoost(_boostEnabled);
         await _engine.setGain(_gain);
         await _engine.setEchoDelay(_echoDelayMs);
@@ -226,10 +341,12 @@ class _HomeScreenState extends State<HomeScreen> {
         if (ok) {
           WakelockPlus.enable();
           _sessionStart = DateTime.now();
+          await _refreshRoute();
+          _showRouteHint();
         }
         setState(() {
           _running = ok;
-          _status = ok ? '실행 중' : _kStartFailed;
+          _status = ok ? _runningStatus() : _kStartFailed;
         });
       }
     } catch (e) {
@@ -268,10 +385,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   children: [
               _LevelMeter(level: _rmsLevel),
               const SizedBox(height: 12),
-              FilledButton.tonalIcon(
-                onPressed: _applyKaraokePreset,
-                icon: const Icon(Icons.mic_external_on),
-                label: const Text('노래방 에코로 맞추기'),
+              // Presets as a single-select row; the active one stays lit until a
+              // slider below moves off it.
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final preset in _kPresets)
+                    ChoiceChip(
+                      label: Text(preset.name),
+                      selected: _isPresetActive(preset),
+                      onSelected: (_) => _applyPreset(preset),
+                    ),
+                ],
               ),
               const SizedBox(height: 8),
               _SliderTile(
@@ -400,6 +525,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                   ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: _resetAdvanced,
+                      icon: const Icon(Icons.restart_alt),
+                      label: const Text('기본값으로 되돌리기'),
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 8),
@@ -484,21 +617,11 @@ class _SliderTile extends StatelessWidget {
 
 class _LevelMeter extends StatelessWidget {
   const _LevelMeter({required this.level});
-  final double level; // 0.0~1.0 선형 RMS
+  final ValueListenable<double> level; // 0.0~1.0 선형 RMS
 
   @override
   Widget build(BuildContext context) {
-    // dBFS 변환 (-60~0), 0이면 -60
-    final db =
-        level > 0 ? (20 * (log(level) / log(10))).clamp(-60.0, 0.0) : -60.0;
-    final fraction = ((db + 60) / 60).clamp(0.0, 1.0); // 0~1
-
-    final color = fraction > 0.85
-        ? Colors.red
-        : fraction > 0.65
-            ? Colors.orange
-            : Colors.greenAccent;
-
+    final background = Theme.of(context).colorScheme.surfaceContainerHighest;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Column(
@@ -508,12 +631,26 @@ class _LevelMeter extends StatelessWidget {
           const SizedBox(height: 4),
           ClipRRect(
             borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: fraction,
-              minHeight: 10,
-              backgroundColor:
-                  Theme.of(context).colorScheme.surfaceContainerHighest,
-              valueColor: AlwaysStoppedAnimation<Color>(color),
+            child: ValueListenableBuilder<double>(
+              valueListenable: level,
+              builder: (context, level, _) {
+                // dBFS 변환 (-60~0), 0이면 -60
+                final db = level > 0
+                    ? (20 * (log(level) / log(10))).clamp(-60.0, 0.0)
+                    : -60.0;
+                final fraction = ((db + 60) / 60).clamp(0.0, 1.0); // 0~1
+                final color = fraction > 0.85
+                    ? Colors.red
+                    : fraction > 0.65
+                        ? Colors.orange
+                        : Colors.greenAccent;
+                return LinearProgressIndicator(
+                  value: fraction,
+                  minHeight: 10,
+                  backgroundColor: background,
+                  valueColor: AlwaysStoppedAnimation<Color>(color),
+                );
+              },
             ),
           ),
         ],

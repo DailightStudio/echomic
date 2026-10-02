@@ -183,6 +183,18 @@ bool AudioEngine::openStreams() {
     return true;
 }
 
+double AudioEngine::getLatencyMs() {
+    std::lock_guard<std::mutex> lock(lifecycleLock_);
+    if (!running_.load() || !inputStream_ || !outputStream_) return -1.0;
+    double total = 0.0;
+    auto in = inputStream_->calculateLatencyMillis();
+    auto out = outputStream_->calculateLatencyMillis();
+    if (in) total += in.value();
+    if (out) total += out.value();
+    if (!in && !out) return -1.0;
+    return total;
+}
+
 void AudioEngine::closeStreams() {
     if (inputStream_) {
         inputStream_->requestStop();
