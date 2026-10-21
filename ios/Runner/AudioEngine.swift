@@ -214,6 +214,11 @@ final class AudioEngine: NSObject {
 
     private(set) var currentRMSLevel: Float = 0.0
 
+    /// Why the engine last stopped on its own ("unplug" / "interruption"),
+    /// nil after a user stop(). Read by the plugin when it reports
+    /// running:false so the UI can say what actually happened.
+    private(set) var lastStopReason: String?
+
     // MARK: - Parameters
 
     // Hard ceiling at 4x: beyond that the compressor makeup + echo feed and
@@ -260,6 +265,7 @@ final class AudioEngine: NSObject {
     // MARK: - Lifecycle
 
     func start() -> Bool {
+        lastStopReason = nil
         if isRunning { return true }
         do {
             try checkMicPermission()
@@ -384,7 +390,32 @@ final class AudioEngine: NSObject {
     }
 
     func stop() {
+        lastStopReason = nil
         internalStop(keepObservers: false)
+    }
+
+    /// Current output route class + round-trip latency estimate for the UI.
+    /// `output`: "speaker" | "wired" | "bluetooth" | "other".
+    func routeInfo() -> [String: Any] {
+        let session = AVAudioSession.sharedInstance()
+        var output = "other"
+        for port in session.currentRoute.outputs {
+            switch port.portType {
+            case .builtInSpeaker, .builtInReceiver: output = "speaker"
+            case .headphones, .usbAudio, .lineOut: output = "wired"
+            case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE: output = "bluetooth"
+            default: break
+            }
+            if output != "other" { break }
+        }
+        var info: [String: Any] = ["output": output]
+        if isRunning {
+            // Mic -> our render callback -> speaker: hardware in + out plus
+            // the two IO buffers the engine needs to turn a block around.
+            let secs = session.inputLatency + session.outputLatency + session.ioBufferDuration * 2
+            info["latencyMs"] = secs * 1000.0
+        }
+        return info
     }
 
     // MARK: - Internals
@@ -507,6 +538,7 @@ final class AudioEngine: NSObject {
                 // plugin's level/state poll reports it (otherwise the UI
                 // keeps showing "running" while the engine is dead).
                 guard self.isRunning else { return }
+                self.lastStopReason = "interruption"
                 DispatchQueue.main.async {
                     self.internalStop(keepObservers: false)
                 }
@@ -542,6 +574,7 @@ final class AudioEngine: NSObject {
                 // the interruption observer above) -- stays stopped until
                 // the user taps Start again.
                 guard self.isRunning else { return }
+                self.lastStopReason = "unplug"
                 DispatchQueue.main.async {
                     self.internalStop(keepObservers: false)
                 }

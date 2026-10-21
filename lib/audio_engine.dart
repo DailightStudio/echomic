@@ -16,9 +16,11 @@ class AudioEngine {
       EventChannel('com.dailightstudio.echomic/events');
 
   /// Stream of native audio events. Emits level updates (`{'type': 'level',
-  /// 'rms': <linear RMS>}`) roughly every 50 ms while running, plus state
-  /// changes (`{'type': 'state', 'running': false}`) when the engine stops
-  /// unexpectedly.
+  /// 'rms': <linear RMS>}`) roughly every 50 ms while running, state
+  /// changes (`{'type': 'state', 'running': false, 'reason': 'unplug' |
+  /// 'interruption'}`, reason absent when unknown) when the engine stops
+  /// unexpectedly, and route changes (`{'type': 'route', ...}` with the same
+  /// payload as [routeInfo]) when an output device comes or goes.
   Stream<Map<String, dynamic>> get audioEvents =>
       _events.receiveBroadcastStream().map(
             (e) => Map<String, dynamic>.from(e as Map),
@@ -40,6 +42,12 @@ class AudioEngine {
   Future<void> stop() async {
     await _channel.invokeMethod<void>('stop');
     _running = false;
+  }
+
+  /// Current output route and, while running, the mic-to-ear latency estimate.
+  Future<RouteInfo> routeInfo() async {
+    final raw = await _channel.invokeMethod<Map>('routeInfo');
+    return RouteInfo.fromMap(raw ?? const {});
   }
 
   /// Linear input gain multiplier. Typical range 1.0 (unity) .. 4.0.
@@ -86,5 +94,28 @@ class AudioEngine {
   /// Enable or disable the SSB frequency shifter (anti-feedback).
   Future<void> setFrequencyShift(bool enabled) async {
     await _channel.invokeMethod<void>('setFrequencyShift', {'enabled': enabled});
+  }
+}
+
+enum AudioOutput { speaker, wired, bluetooth, other }
+
+/// Where the sound is going and how late it gets there.
+class RouteInfo {
+  const RouteInfo({required this.output, this.latencyMs});
+
+  final AudioOutput output;
+
+  /// Mic -> speaker round trip in ms; null while the engine is not running
+  /// or when the platform cannot say.
+  final double? latencyMs;
+
+  static RouteInfo fromMap(Map raw) {
+    final output = switch (raw['output']) {
+      'speaker' => AudioOutput.speaker,
+      'wired' => AudioOutput.wired,
+      'bluetooth' => AudioOutput.bluetooth,
+      _ => AudioOutput.other,
+    };
+    return RouteInfo(output: output, latencyMs: (raw['latencyMs'] as num?)?.toDouble());
   }
 }

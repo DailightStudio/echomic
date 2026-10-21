@@ -57,6 +57,9 @@ public:
     void setFrequencyShiftEnabled(bool en)   { freqShifter_.enabled.store(en); }
     float getRmsLevel() const         { return rmsLevel_.load(); }
     bool isRunning() const            { return running_.load(); }
+    // Mic -> callback -> speaker round-trip estimate in ms (input + output
+    // stream latency as Oboe reports them); < 0 while not running.
+    double getLatencyMs();
 
     // oboe::AudioStreamErrorCallback (registered on the output stream only;
     // FullDuplexStream's contract is that the caller stops/closes the input

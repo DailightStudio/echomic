@@ -5,7 +5,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
@@ -34,6 +37,14 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     // the still-open mic.
     private var noisyReceiver: BroadcastReceiver? = null
 
+    // Pushes a 'route' event whenever an output device comes or goes so the
+    // UI can re-evaluate speaker/wired/bluetooth hints without polling.
+    private var deviceCallback: AudioDeviceCallback? = null
+
+    // Why the engine last stopped on its own ("unplug"); null after a user
+    // stop. Attached to the running:false event so the UI can say what happened.
+    private var stopReason: String? = null
+
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         appContext = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, CHANNEL)
@@ -44,11 +55,13 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 eventSink = events
                 startPolling()
+                registerDeviceCallback()
             }
 
             override fun onCancel(arguments: Any?) {
                 eventSink = null
                 stopPolling()
+                unregisterDeviceCallback()
             }
         })
     }
@@ -57,6 +70,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         channel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
         stopPolling()
+        unregisterDeviceCallback()
         eventSink = null
         endSession()
     }
@@ -71,6 +85,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                     result.error(ERR_BACKGROUND, "app is not in the foreground", null)
                     return
                 }
+                stopReason = null
                 val ok = nativeStart()
                 if (ok) {
                     try {
@@ -92,6 +107,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 endSession()
                 result.success(null)
             }
+            "routeInfo" -> result.success(routeInfo())
             "setGain" -> {
                 val gain = (call.argument<Double>("gain") ?: 1.0).toFloat()
                 nativeSetGain(gain)
@@ -154,7 +170,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                     // Native died on its own (e.g. a failed input read/
                     // reconnect) without going through stop(): the FGS
                     // notification would otherwise outlive the engine.
-                    endSession(reason = "interrupted")
+                    endSession(reason = "engine")
                 }
                 // 레벨 이벤트
                 if (running) {
@@ -184,9 +200,10 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         EchoMicForegroundService.onForegroundRefused = null
         EchoMicForegroundService.stop()
         unregisterNoisyReceiver()
-        if (reason != null) {
-            eventSink?.success(mapOf("type" to "state", "running" to false, "reason" to reason))
-        }
+        // reason == null: user-initiated stop (Dart already knows). Otherwise tell Dart why,
+        // in the same event shape iOS sends ('unplug' | 'interruption' | other).
+        stopReason = reason
+        if (reason != null) eventSink?.success(stateStoppedEvent())
     }
 
     private fun inForeground(): Boolean {
@@ -200,7 +217,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         if (noisyReceiver != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                endSession(reason = "interrupted")
+                endSession(reason = "unplug")
             }
         }
         ContextCompat.registerReceiver(
@@ -210,6 +227,60 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
         noisyReceiver = receiver
+    }
+
+    private fun stateStoppedEvent(): Map<String, Any> {
+        val event = mutableMapOf<String, Any>("type" to "state", "running" to false)
+        stopReason?.let { event["reason"] = it }
+        return event
+    }
+
+    // --- Output route (speaker / wired / bluetooth) + latency for the UI ---
+    private fun routeInfo(): Map<String, Any> {
+        val am = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        var output = "speaker"
+        // Wired wins over BT (that is how the platform routes when both are
+        // attached); anything attached beats the built-in speaker.
+        var hasWired = false
+        var hasBt = false
+        for (d in am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            when (d.type) {
+                AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> hasWired = true
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> hasBt = true
+                else -> if (Build.VERSION.SDK_INT >= 33 &&
+                    (d.type == AudioDeviceInfo.TYPE_BLE_HEADSET || d.type == AudioDeviceInfo.TYPE_BLE_SPEAKER)) hasBt = true
+            }
+        }
+        if (hasWired) output = "wired" else if (hasBt) output = "bluetooth"
+        val info = mutableMapOf<String, Any>("output" to output)
+        val latency = nativeGetLatencyMs()
+        if (latency >= 0) info["latencyMs"] = latency
+        return info
+    }
+
+    private fun registerDeviceCallback() {
+        if (deviceCallback != null) return
+        val am = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val cb = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) = pushRoute()
+            override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>?) = pushRoute()
+            private fun pushRoute() {
+                val sink = eventSink ?: return
+                val event = mutableMapOf<String, Any>("type" to "route")
+                event.putAll(routeInfo())
+                sink.success(event)
+            }
+        }
+        am.registerAudioDeviceCallback(cb, android.os.Handler(android.os.Looper.getMainLooper()))
+        deviceCallback = cb
+    }
+
+    private fun unregisterDeviceCallback() {
+        deviceCallback?.let {
+            (appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(it)
+            deviceCallback = null
+        }
     }
 
     private fun unregisterNoisyReceiver() {
@@ -227,6 +298,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private external fun nativeSetEchoFeedback(feedback: Float)
     private external fun nativeGetRmsLevel(): Float
     private external fun nativeIsRunning(): Boolean
+    private external fun nativeGetLatencyMs(): Double
     private external fun nativeSetReverbWet(wet: Float)
     private external fun nativeSetMasterGain(gain: Float)
     private external fun nativeSetGateThreshold(db: Float)

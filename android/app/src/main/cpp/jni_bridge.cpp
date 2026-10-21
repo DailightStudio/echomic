@@ -71,6 +71,12 @@ Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeGetRmsLevel(JNIEnv * /*e
     return gEngine ? static_cast<jfloat>(gEngine->getRmsLevel()) : 0.0f;
 }
 
+JNIEXPORT jdouble JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeGetLatencyMs(JNIEnv * /*env*/,
+                                                                      jobject /*thiz*/) {
+    return gEngine ? static_cast<jdouble>(gEngine->getLatencyMs()) : -1.0;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeIsRunning(JNIEnv * /*env*/,
                                                                    jobject /*thiz*/) {
