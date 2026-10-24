@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
@@ -15,7 +17,8 @@ class Analytics {
 
   static Future<void> init() async {
     try {
-      await Firebase.initializeApp(options: firebaseOptions);
+      // Android: the default app already exists, built from resources.
+      await Firebase.initializeApp(options: Platform.isIOS ? iosFirebaseOptions : null);
       _fa = FirebaseAnalytics.instance;
     } catch (e) {
       debugPrint('analytics init failed: $e');

@@ -333,6 +333,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _toggle() async {
     if (_busy) return;
     setState(() => _busy = true);
+    // Start reached the engine: a later throw is not a start failure.
+    bool engineStarted = false;
     try {
       if (_running) {
         await _engine.stop();
@@ -401,12 +403,13 @@ class _HomeScreenState extends State<HomeScreen> {
         await _engine.setFrequencyShift(_freqShiftEnabled);
 
         final bool ok = await _engine.start();
+        engineStarted = ok;
         if (ok) {
           WakelockPlus.enable();
           _sessionStart = DateTime.now();
           await _refreshRoute();
-          _showRouteHint();
           Analytics.echoStart(_output, _latencyMs);
+          _showRouteHint();
         } else {
           Analytics.startFailed('engine');
         }
@@ -418,7 +421,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       debugPrint('toggle failed: $e');
-      if (!_running) {
+      if (!_running && !engineStarted) {
         Analytics.startFailed(
             e is PlatformException && e.code == 'background' ? 'background' : 'error');
       }

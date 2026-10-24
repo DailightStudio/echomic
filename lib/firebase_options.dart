@@ -1,21 +1,11 @@
-// Firebase project echomic-dailight (Analytics only). Options live here, not
-// in google-services.json / GoogleService-Info.plist, so neither platform
-// build needs the Google Services plugin or an Xcode resource entry.
-import 'dart:io';
-
+// Firebase project echomic-dailight (Analytics only). iOS is configured from
+// these options, so no GoogleService-Info.plist / Xcode resource is needed.
+// Android reads its config from res/values/firebase.xml instead: Analytics
+// only takes google_app_id from resources, and FirebaseInitProvider already
+// creates the default app from them before Dart runs.
 import 'package:firebase_core/firebase_core.dart';
 
-FirebaseOptions get firebaseOptions => Platform.isIOS ? _ios : _android;
-
-const FirebaseOptions _android = FirebaseOptions(
-  apiKey: 'AIzaSyCUiN7HJBg6r57kEs2oE3HnLkSI0VIU-7E',
-  appId: '1:820215156909:android:5c5d5ce3f3f9e49a47f624',
-  messagingSenderId: '820215156909',
-  projectId: 'echomic-dailight',
-  storageBucket: 'echomic-dailight.firebasestorage.app',
-);
-
-const FirebaseOptions _ios = FirebaseOptions(
+const FirebaseOptions iosFirebaseOptions = FirebaseOptions(
   apiKey: 'AIzaSyCQX8UI0p8dOMv2iKUqNqTfEVnKQQJnSxI',
   appId: '1:820215156909:ios:75af4b29026cf8a947f624',
   messagingSenderId: '820215156909',

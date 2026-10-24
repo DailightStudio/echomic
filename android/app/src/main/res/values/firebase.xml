@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Firebase config for Android (project echomic-dailight), read by
+     FirebaseInitProvider and Analytics. iOS: lib/firebase_options.dart. -->
+<resources>
+    <string name="google_app_id" translatable="false">1:820215156909:android:5c5d5ce3f3f9e49a47f624</string>
+    <string name="gcm_defaultSenderId" translatable="false">820215156909</string>
+    <string name="project_id" translatable="false">echomic-dailight</string>
+    <string name="google_api_key" translatable="false">AIzaSyCUiN7HJBg6r57kEs2oE3HnLkSI0VIU-7E</string>
+</resources>
