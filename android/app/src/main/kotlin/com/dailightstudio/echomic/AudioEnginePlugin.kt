@@ -185,8 +185,12 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                     result.error("disk_full", "Less than 200 MB free", null)
                     return
                 }
-                val name = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".wav"
-                val path = File(dir, name).absolutePath
+                val stem = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                // 1 s resolution + native "wb" truncation: never reuse a name.
+                var file = File(dir, "$stem.wav")
+                var n = 2
+                while (file.exists()) file = File(dir, "${stem}_${n++}.wav")
+                val path = file.absolutePath
                 val ok = nativeStartRecording(path, MAX_RECORD_SECONDS)
                 if (ok) lastRecordingPath = path
                 result.success(ok)

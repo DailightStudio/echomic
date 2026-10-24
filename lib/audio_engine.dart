@@ -114,13 +114,15 @@ class AudioEngine {
     return (await _channel.invokeMethod<String>('recordingsDir'))!;
   }
 
-  /// Starts recording the processed voice while the engine runs. Returns
-  /// false when there is not enough free space or the engine is not running.
-  Future<bool> startRecording() async {
+  /// Starts recording the processed voice while the engine runs. diskFull:
+  /// native refused for low free space; failed: native returned false
+  /// (engine not running, file could not be created).
+  Future<RecordStart> startRecording() async {
     try {
-      return await _channel.invokeMethod<bool>('startRecording') ?? false;
+      final ok = await _channel.invokeMethod<bool>('startRecording') ?? false;
+      return ok ? RecordStart.ok : RecordStart.failed;
     } on PlatformException catch (e) {
-      if (e.code == 'disk_full') return false;
+      if (e.code == 'disk_full') return RecordStart.diskFull;
       rethrow;
     }
   }
@@ -129,6 +131,8 @@ class AudioEngine {
     await _channel.invokeMethod<void>('stopRecording');
   }
 }
+
+enum RecordStart { ok, diskFull, failed }
 
 enum AudioOutput { speaker, wired, bluetooth, other }
 

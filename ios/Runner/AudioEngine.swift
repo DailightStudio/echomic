@@ -497,6 +497,10 @@ final class AudioEngine: NSObject {
         recMaxFrames = AVAudioFramePosition(fmt.sampleRate * Double(max(maxSeconds, 1)))
         recLock.unlock()
 
+        // Idempotent: a tap left on the reused `limiter` (e.g. after
+        // mediaServicesWereReset skipped removeTap) would make installTap
+        // throw an NSException. Removing a nonexistent tap is a no-op.
+        limiter.removeTap(onBus: 0)
         limiter.installTap(onBus: 0, bufferSize: 4096, format: fmt) { [weak self] buffer, _ in
             self?.writeTapBuffer(buffer, token: token)
         }

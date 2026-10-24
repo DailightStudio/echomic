@@ -13,6 +13,7 @@ import 'ads.dart';
 import 'analytics.dart';
 import 'audio_engine.dart';
 import 'recordings_screen.dart';
+import 'ui_colors.dart';
 
 // Echo/reverb presets. The first one (karaoke) is also the fresh-install
 // default, so the first Start already sounds like one.
@@ -177,7 +178,7 @@ class _HomeScreenState extends State<HomeScreen> {
             } else if (!running && _running) {
               _engine.stop(); // make sure nothing is left capturing
               WakelockPlus.disable();
-              _endTune();
+              _resetLiveState();
               final started = _sessionStart;
               Analytics.echoStop(reason ?? 'unknown',
                   started == null ? null : DateTime.now().difference(started));
@@ -403,14 +404,16 @@ class _HomeScreenState extends State<HomeScreen> {
         await _engine.stopRecording();
         return;
       }
-      final ok = await _engine.startRecording();
+      final result = await _engine.startRecording();
       if (!mounted) return;
-      if (ok) {
+      if (result == RecordStart.ok) {
         Analytics.recordStart();
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('저장 공간이 부족하여 녹음을 시작할 수 없습니다.'),
-          duration: Duration(seconds: 3),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(result == RecordStart.diskFull
+              ? '저장 공간이 부족하여 녹음을 시작할 수 없습니다.'
+              : '녹음을 시작하지 못했습니다. 다시 시도해 주세요.'),
+          duration: const Duration(seconds: 3),
         ));
       }
     } catch (e) {
@@ -443,9 +446,12 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Engine stopped: drop press/latch so the next session starts dry.
-  void _endTune() {
+  // Engine stopped (by the user or on its own): drop press/latch so the next
+  // session starts dry, and zero the meter so it does not freeze on the last
+  // level.
+  void _resetLiveState() {
     if (_tuneOn) _setTune(pressed: false, latched: false);
+    _rmsLevel.value = 0.0;
   }
 
   Future<void> _toggle() async {
@@ -457,7 +463,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (_running) {
         await _engine.stop();
         WakelockPlus.disable();
-        _endTune();
+        _resetLiveState();
         setState(() {
           _running = false;
           _speakerAec = false;
@@ -565,6 +571,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
+    final TextTheme tt = Theme.of(context).textTheme;
     return Scaffold(
       appBar: AppBar(
         title: const Text('에코마이크'),
@@ -586,251 +593,242 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             // App Review 2.5.14: a clear, always-on indicator while the mic is live.
             // It cannot be turned off and stays visible for the whole session.
-            if (_running) const _MicLiveBanner(),
+            if (_running) _MicLiveBanner(recording: _recording),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.only(bottom: 16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-              _StageHeader(running: _running, status: _status),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-              if (_hint != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Text(
-                    _hint!,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.error),
-                  ),
-                ),
-              _AutotunePad(
-                enabled: _running,
-                active: _tuneOn,
-                latched: _tuneLatched,
-                onPressed: (down) => _setTune(pressed: down),
-                onLatchChanged: (on) => _setTune(latched: on),
-              ),
-              const SizedBox(height: 12),
-              _LevelMeter(level: _rmsLevel),
-              const SizedBox(height: 12),
-              // Presets as a single-select row; the active one stays lit until a
-              // slider below moves off it.
-              Wrap(
-                spacing: 8,
-                children: [
-                  for (final preset in _kPresets)
-                    ChoiceChip(
-                      label: Text(preset.name),
-                      selected: _isPresetActive(preset),
-                      onSelected: (_) => _applyPreset(preset),
+                    _StageHeader(
+                        running: _running, status: _status, level: _rmsLevel),
+                    if (_hint != null)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+                        child: Text(
+                          _hint!,
+                          textAlign: TextAlign.center,
+                          style: tt.bodyMedium?.copyWith(color: cs.error),
+                        ),
+                      ),
+                    Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Text('효과', style: tt.titleMedium),
+                            const SizedBox(height: 10),
+                            // Presets as a single-select row; the active one stays
+                            // lit until a slider below moves off it.
+                            // Wrap, not a side-scroll: a chip cut at the edge
+                            // read as broken on 360 dp phones.
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: [
+                                for (final preset in _kPresets)
+                                  ChoiceChip(
+                                    showCheckmark: false,
+                                    visualDensity: VisualDensity.compact,
+                                    padding:
+                                        const EdgeInsets.symmetric(horizontal: 6),
+                                    labelPadding:
+                                        const EdgeInsets.only(left: 2, right: 4),
+                                    label: Text(preset.name),
+                                    selected: _isPresetActive(preset),
+                                    onSelected: (_) => _applyPreset(preset),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            _SliderTile(
+                              label: '에코 길이',
+                              value: _echoDelayMs,
+                              min: 0.0,
+                              max: 500.0,
+                              valueLabel: '${_echoDelayMs.round()} ms',
+                              onChanged: (v) {
+                                setState(() => _echoDelayMs = v);
+                                _sendParam(
+                                    'echoDelay', () => _engine.setEchoDelay(v));
+                              },
+                              onChangeEnd: (_) => _savePrefs(),
+                            ),
+                            _SliderTile(
+                              label: '에코 반복',
+                              value: _echoFeedback,
+                              min: 0.0,
+                              max: 0.8,
+                              valueLabel: '${(_echoFeedback * 100).round()}%',
+                              onChanged: (v) {
+                                setState(() => _echoFeedback = v);
+                                _sendParam('echoFeedback',
+                                    () => _engine.setEchoFeedback(v));
+                              },
+                              onChangeEnd: (_) => _savePrefs(),
+                            ),
+                            _SliderTile(
+                              label: '리버브',
+                              value: _reverbMix,
+                              min: 0.0,
+                              max: 1.0,
+                              valueLabel: '${(_reverbMix * 100).round()}%',
+                              onChanged: (v) {
+                                setState(() => _reverbMix = v);
+                                _sendParam(
+                                    'reverb', () => _engine.setReverbMix(v));
+                              },
+                              onChangeEnd: (_) => _savePrefs(),
+                            ),
+                            _SliderTile(
+                              label: '볼륨',
+                              value: _masterVolume,
+                              min: 0.0,
+                              max: 1.0,
+                              valueLabel: '${(_masterVolume * 100).round()}%',
+                              onChanged: (v) {
+                                setState(() => _masterVolume = v);
+                                _sendParam(
+                                    'master', () => _engine.setMasterVolume(v));
+                              },
+                              onChangeEnd: (_) => _savePrefs(),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              _SliderTile(
-                label: '에코 길이',
-                value: _echoDelayMs,
-                min: 0.0,
-                max: 500.0,
-                valueLabel: '${_echoDelayMs.round()} ms',
-                onChanged: (v) {
-                  setState(() => _echoDelayMs = v);
-                  _sendParam('echoDelay', () => _engine.setEchoDelay(v));
-                },
-                onChangeEnd: (_) => _savePrefs(),
-              ),
-              _SliderTile(
-                label: '에코 반복',
-                value: _echoFeedback,
-                min: 0.0,
-                max: 0.8,
-                valueLabel: '${(_echoFeedback * 100).round()}%',
-                onChanged: (v) {
-                  setState(() => _echoFeedback = v);
-                  _sendParam('echoFeedback', () => _engine.setEchoFeedback(v));
-                },
-                onChangeEnd: (_) => _savePrefs(),
-              ),
-              _SliderTile(
-                label: '리버브',
-                value: _reverbMix,
-                min: 0.0,
-                max: 1.0,
-                valueLabel: '${(_reverbMix * 100).round()}%',
-                onChanged: (v) {
-                  setState(() => _reverbMix = v);
-                  _sendParam('reverb', () => _engine.setReverbMix(v));
-                },
-                onChangeEnd: (_) => _savePrefs(),
-              ),
-              _SliderTile(
-                label: '볼륨',
-                value: _masterVolume,
-                min: 0.0,
-                max: 1.0,
-                valueLabel: '${(_masterVolume * 100).round()}%',
-                onChanged: (v) {
-                  setState(() => _masterVolume = v);
-                  _sendParam('master', () => _engine.setMasterVolume(v));
-                },
-                onChangeEnd: (_) => _savePrefs(),
-              ),
-              // Fine-tuning most singers never need; kept out of the first screen.
-              ExpansionTile(
-                title: const Text('고급 설정'),
-                tilePadding: EdgeInsets.zero,
-                childrenPadding: EdgeInsets.zero,
-                maintainState: true,
-                children: [
-                  SwitchListTile(
-                    title: const Text('증폭'),
-                    subtitle: Text(_boostEnabled
-                        ? '목소리를 키워서 내보냅니다'
-                        : '목소리를 원래 크기 그대로 내보냅니다'),
-                    value: _boostEnabled,
-                    onChanged: (v) {
-                      setState(() => _boostEnabled = v);
-                      _engine.setBoost(v);
-                      _savePrefs();
-                    },
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                  ),
-                  _SliderTile(
-                    label: '증폭 크기',
-                    value: _gain,
-                    min: 1.0,
-                    max: 4.0, // native caps gain at 4x (8x clipped through the limiter)
-                    valueLabel: _boostEnabled
-                        ? '${_gain.toStringAsFixed(1)}배'
-                        : '1.0배',
-                    // Native pins gain to 1.0 while boost is off.
-                    onChanged: _boostEnabled
-                        ? (v) {
-                            setState(() => _gain = v);
-                            _sendParam('gain', () => _engine.setGain(v));
-                          }
-                        : null,
-                    onChangeEnd: (_) => _savePrefs(),
-                  ),
-                  _SliderTile(
-                    label: '노이즈 게이트',
-                    value: _gateThresholdDb,
-                    min: -60.0,
-                    max: -10.0,
-                    valueLabel: '${_gateThresholdDb.round()} dB',
-                    onChanged: (v) {
-                      setState(() => _gateThresholdDb = v);
-                      _sendParam('gate', () => _engine.setGateThreshold(v));
-                    },
-                    onChangeEnd: (_) => _savePrefs(),
-                  ),
-                  // Horizontal like every other slider: vertical EQ sliders
-                  // grabbed the page's scroll drag and silently moved bands.
-                  for (int band = 0; band < _kEqBands.length; band++)
-                    _SliderTile(
-                      label: 'EQ ${_kEqBands[band]}',
-                      value: _eqGains[band],
-                      min: -12,
-                      max: 12,
-                      valueLabel: _signedDb(_eqGains[band]),
-                      onChanged: (v) {
-                        setState(() => _eqGains[band] = v);
-                        _sendParam('eq$band', () => _engine.setEQBand(band, v));
-                      },
-                      onChangeEnd: (_) => _savePrefs(),
+                    const SizedBox(height: 12),
+                    // Fine-tuning most singers never need; kept out of the first screen.
+                    Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      clipBehavior: Clip.antiAlias,
+                      child: ExpansionTile(
+                        leading: const Icon(Icons.tune),
+                        title: const Text('고급 설정'),
+                        shape: const Border(),
+                        collapsedShape: const Border(),
+                        tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+                        childrenPadding:
+                            const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                        maintainState: true,
+                        children: [
+                          SwitchListTile(
+                            title: const Text('증폭'),
+                            subtitle: Text(_boostEnabled
+                                ? '목소리를 키워서 내보냅니다'
+                                : '목소리를 원래 크기 그대로 내보냅니다'),
+                            value: _boostEnabled,
+                            onChanged: (v) {
+                              setState(() => _boostEnabled = v);
+                              _engine.setBoost(v);
+                              _savePrefs();
+                            },
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                          ),
+                          _SliderTile(
+                            label: '증폭 크기',
+                            value: _gain,
+                            min: 1.0,
+                            max:
+                                4.0, // native caps gain at 4x (8x clipped through the limiter)
+                            valueLabel: _boostEnabled
+                                ? '${_gain.toStringAsFixed(1)}배'
+                                : '1.0배',
+                            // Native pins gain to 1.0 while boost is off.
+                            onChanged: _boostEnabled
+                                ? (v) {
+                                    setState(() => _gain = v);
+                                    _sendParam(
+                                        'gain', () => _engine.setGain(v));
+                                  }
+                                : null,
+                            onChangeEnd: (_) => _savePrefs(),
+                          ),
+                          _SliderTile(
+                            label: '노이즈 게이트',
+                            value: _gateThresholdDb,
+                            min: -60.0,
+                            max: -10.0,
+                            valueLabel: '${_gateThresholdDb.round()} dB',
+                            onChanged: (v) {
+                              setState(() => _gateThresholdDb = v);
+                              _sendParam(
+                                  'gate', () => _engine.setGateThreshold(v));
+                            },
+                            onChangeEnd: (_) => _savePrefs(),
+                          ),
+                          // Horizontal like every other slider: vertical EQ sliders
+                          // grabbed the page's scroll drag and silently moved bands.
+                          for (int band = 0; band < _kEqBands.length; band++)
+                            _SliderTile(
+                              label: 'EQ ${_kEqBands[band]}',
+                              value: _eqGains[band],
+                              min: -12,
+                              max: 12,
+                              valueLabel: _signedDb(_eqGains[band]),
+                              onChanged: (v) {
+                                setState(() => _eqGains[band] = v);
+                                _sendParam('eq$band',
+                                    () => _engine.setEQBand(band, v));
+                              },
+                              onChangeEnd: (_) => _savePrefs(),
+                            ),
+                          SwitchListTile(
+                            title: const Text('하울링 억제'),
+                            subtitle: const Text('스피커에서 삐 소리가 나면 켜세요'),
+                            value: _freqShiftEnabled,
+                            onChanged: (v) {
+                              setState(() => _freqShiftEnabled = v);
+                              _engine.setFrequencyShift(v);
+                              _savePrefs();
+                            },
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                          ),
+                          SwitchListTile(
+                            title: const Text('스피커 모드 자동'),
+                            subtitle: Text(_speakerAecAuto
+                                ? '스피커로 쓰면 에코 제거를 자동으로 켭니다'
+                                : '항상 끕니다 (하울링 주의)'),
+                            value: _speakerAecAuto,
+                            onChanged: (v) {
+                              setState(() => _speakerAecAuto = v);
+                              _engine.setSpeakerAec(v);
+                              _savePrefs();
+                              _refreshRouteAfterSwitch();
+                            },
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                          ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              onPressed: _resetAdvanced,
+                              icon: const Icon(Icons.restart_alt),
+                              label: const Text('기본값으로 되돌리기'),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  SwitchListTile(
-                    title: const Text('하울링 억제'),
-                    subtitle: const Text('스피커에서 삐 소리가 나면 켜세요'),
-                    value: _freqShiftEnabled,
-                    onChanged: (v) {
-                      setState(() => _freqShiftEnabled = v);
-                      _engine.setFrequencyShift(v);
-                      _savePrefs();
-                    },
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                  ),
-                  SwitchListTile(
-                    title: const Text('스피커 모드 자동'),
-                    subtitle: Text(_speakerAecAuto
-                        ? '스피커로 쓰면 에코 제거를 자동으로 켭니다'
-                        : '항상 끕니다 (하울링 주의)'),
-                    value: _speakerAecAuto,
-                    onChanged: (v) {
-                      setState(() => _speakerAecAuto = v);
-                      _engine.setSpeakerAec(v);
-                      _savePrefs();
-                      _refreshRouteAfterSwitch();
-                    },
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                  ),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton.icon(
-                      onPressed: _resetAdvanced,
-                      icon: const Icon(Icons.restart_alt),
-                      label: const Text('기본값으로 되돌리기'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-                  ],
-                ),
-              ),
                   ],
                 ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-              child: SizedBox(
-                height: 64,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed: _busy ? null : _toggle,
-                        icon: Icon(_running ? Icons.stop : Icons.play_arrow),
-                        label: Text(
-                          _running ? '정지' : '시작',
-                          style: const TextStyle(fontSize: 20),
-                        ),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: _running ? cs.error : cs.primary,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    OutlinedButton.icon(
-                      onPressed: _running ? _toggleRecording : null,
-                      icon: Icon(
-                        _recording ? Icons.stop : Icons.fiber_manual_record,
-                        color: _running ? Colors.red : null,
-                      ),
-                      label: ValueListenableBuilder<int>(
-                        valueListenable: _recSeconds,
-                        builder: (_, sec, __) => Text(
-                          _recording
-                              ? '${(sec ~/ 60).toString().padLeft(2, '0')}:'
-                                  '${(sec % 60).toString().padLeft(2, '0')}'
-                              : '녹음',
-                          style: const TextStyle(fontSize: 18),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+            _ControlDeck(
+              running: _running,
+              busy: _busy,
+              recording: _recording,
+              recSeconds: _recSeconds,
+              tuneOn: _tuneOn,
+              tuneLatched: _tuneLatched,
+              onToggle: _toggle,
+              onRecord: _toggleRecording,
+              onTunePressed: (down) => _setTune(pressed: down),
+              onTuneLatchChanged: (on) => _setTune(latched: on),
             ),
             // AdMob: keep the banner well clear of the Start/Stop button so a
             // thumb aimed at the button cannot land on the ad (~49dp gap).
@@ -865,38 +863,345 @@ class _SliderTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(label, style: Theme.of(context).textTheme.titleSmall),
-            Text(valueLabel, style: Theme.of(context).textTheme.titleSmall),
-          ],
-        ),
-        // TalkBack otherwise reads a bare "slider, 35%" with no name.
-        Semantics(
-          label: label,
-          value: valueLabel,
-          child: Slider(
-            value: value,
-            min: min,
-            max: max,
-            onChanged: onChanged,
-            onChangeEnd: onChangeEnd,
+    final tt = Theme.of(context).textTheme;
+    final enabled = onChanged != null;
+    // ~64dp: label/value row, then the slider with trimmed vertical padding.
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text(label, style: tt.bodyMedium)),
+              Text(
+                valueLabel,
+                style: tt.labelLarge?.copyWith(
+                  color: enabled ? kNeonA : Theme.of(context).disabledColor,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
           ),
-        ),
-      ],
+          // TalkBack otherwise reads a bare "slider, 35%" with no name.
+          Semantics(
+            label: label,
+            value: valueLabel,
+            child: SizedBox(
+              height: 36,
+              child: Slider(
+                value: value,
+                min: min,
+                max: max,
+                padding: const EdgeInsets.symmetric(horizontal: 9),
+                onChanged: onChanged,
+                onChangeEnd: onChangeEnd,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// Press-and-hold auto-tune pad. Lit while held or latched; the lock button
+/// Fixed bottom deck: record (left), start/stop (center), auto-tune pad (right).
+class _ControlDeck extends StatelessWidget {
+  const _ControlDeck({
+    required this.running,
+    required this.busy,
+    required this.recording,
+    required this.recSeconds,
+    required this.tuneOn,
+    required this.tuneLatched,
+    required this.onToggle,
+    required this.onRecord,
+    required this.onTunePressed,
+    required this.onTuneLatchChanged,
+  });
+
+  final bool running;
+  final bool busy;
+  final bool recording;
+  final ValueListenable<int> recSeconds;
+  final bool tuneOn;
+  final bool tuneLatched;
+  final VoidCallback onToggle;
+  final VoidCallback onRecord;
+  final ValueChanged<bool> onTunePressed;
+  final ValueChanged<bool> onTuneLatchChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final muted = cs.onSurfaceVariant.withValues(alpha: 0.7);
+    // Every control sits in an 84dp slot so the captions line up.
+    Widget column(Widget control, Widget caption, String? sub) => Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(height: 84, child: Center(child: control)),
+            const SizedBox(height: 6),
+            caption,
+            if (sub != null)
+              ExcludeSemantics(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(sub, style: tt.bodySmall?.copyWith(color: muted)),
+                ),
+              ),
+          ],
+        );
+    Widget label(String text, {bool enabled = true}) => FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: enabled ? cs.onSurface : muted,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        );
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        // Flutter only paints a radius with a uniform border; the bottom edge
+        // is hidden by the divider below anyway.
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: column(
+              _RecordButton(
+                enabled: running,
+                recording: recording,
+                onPressed: onRecord,
+              ),
+              recording
+                  ? ValueListenableBuilder<int>(
+                      valueListenable: recSeconds,
+                      builder: (_, sec, __) =>
+                          label('${(sec ~/ 60).toString().padLeft(2, '0')}:'
+                              '${(sec % 60).toString().padLeft(2, '0')}'),
+                    )
+                  : ExcludeSemantics(child: label('녹음', enabled: running)),
+              running ? null : '시작 후 가능',
+            ),
+          ),
+          Expanded(
+            child: column(
+              _StartButton(running: running, busy: busy, onPressed: onToggle),
+              ExcludeSemantics(child: label(running ? '정지' : '시작')),
+              null,
+            ),
+          ),
+          Expanded(
+            child: column(
+              _TunePad(
+                enabled: running,
+                active: tuneOn,
+                latched: tuneLatched,
+                onPressed: onTunePressed,
+                onLatchChanged: onTuneLatchChanged,
+              ),
+              ExcludeSemantics(child: label('오토튠', enabled: running)),
+              tuneLatched ? '고정됨' : '누르는 동안',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 60dp record circle. Muted while the engine is off; filled and pulsing
+/// while recording.
+class _RecordButton extends StatefulWidget {
+  const _RecordButton({
+    required this.enabled,
+    required this.recording,
+    required this.onPressed,
+  });
+
+  final bool enabled;
+  final bool recording;
+  final VoidCallback onPressed;
+
+  @override
+  State<_RecordButton> createState() => _RecordButtonState();
+}
+
+class _RecordButtonState extends State<_RecordButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.recording) _pulse.repeat(reverse: true);
+  }
+
+  @override
+  void didUpdateWidget(_RecordButton old) {
+    super.didUpdateWidget(old);
+    if (widget.recording && !_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    } else if (!widget.recording && _pulse.isAnimating) {
+      _pulse
+        ..stop()
+        ..value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = widget.enabled;
+    final recording = widget.recording;
+    final dim = !enabled;
+    final Widget icon = recording
+        ? const Icon(Icons.stop_rounded, color: Colors.white, size: 30)
+        : Icon(Icons.fiber_manual_record,
+            color: dim ? kRec.withValues(alpha: 0.5) : kRec, size: 26);
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: recording ? '녹음 정지' : '녹음',
+      hint: enabled ? null : '시작한 뒤 녹음할 수 있습니다',
+      excludeSemantics: true,
+      onTap: enabled ? widget.onPressed : null,
+      child: AnimatedBuilder(
+        animation: _pulse,
+        builder: (context, child) => Container(
+          width: 60,
+          height: 60,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            boxShadow: recording
+                ? [
+                    BoxShadow(
+                      color: kRec.withValues(alpha: 0.25 + 0.35 * _pulse.value),
+                      blurRadius: 8 + 10 * _pulse.value,
+                    ),
+                  ]
+                : null,
+          ),
+          child: child,
+        ),
+        child: Material(
+          color: recording ? kRec : Colors.transparent,
+          shape: CircleBorder(
+            side: BorderSide(
+              color: dim ? kRec.withValues(alpha: 0.35) : kRec,
+              width: 2,
+            ),
+          ),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: enabled ? widget.onPressed : null,
+            child: Center(child: icon),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 84dp start/stop circle: neon gradient when stopped, error red when running.
+class _StartButton extends StatelessWidget {
+  const _StartButton({
+    required this.running,
+    required this.busy,
+    required this.onPressed,
+  });
+
+  final bool running;
+  final bool busy;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Semantics(
+      button: true,
+      enabled: !busy,
+      label: running ? '정지' : '시작',
+      excludeSemantics: true,
+      onTap: busy ? null : onPressed,
+      child: Container(
+        width: 84,
+        height: 84,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          // Running: dark disc with a neon ring, so it does not read as a
+          // second red record button next to it.
+          color: running ? cs.surfaceContainerHighest : null,
+          border: running ? Border.all(color: kNeonB, width: 2) : null,
+          gradient: running
+              ? null
+              : const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [kNeonA, kNeonB],
+                ),
+          boxShadow: [
+            BoxShadow(
+                color: kNeonB.withValues(alpha: running ? 0.3 : 0.45),
+                blurRadius: 18),
+          ],
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: busy ? null : onPressed,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(
+                  running ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                  color: Colors.white.withValues(alpha: busy ? 0.5 : 1),
+                  size: 40,
+                ),
+                if (busy)
+                  const SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      color: Colors.white,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Press-and-hold auto-tune DJ pad. Lit while held or latched; the lock badge
 /// keeps it on hands-free (and is the screen-reader path, since a long press
 /// is awkward there).
-class _AutotunePad extends StatelessWidget {
-  const _AutotunePad({
+class _TunePad extends StatelessWidget {
+  const _TunePad({
     required this.enabled,
     required this.active,
     required this.latched,
@@ -914,104 +1219,103 @@ class _AutotunePad extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final lit = enabled && active;
-    final fg = !enabled
-        ? cs.onSurface.withValues(alpha: 0.38)
-        : lit
-            ? cs.onPrimary
-            : cs.onSurfaceVariant;
-    return Row(
-      children: [
-        Expanded(
-          child: Semantics(
-            button: true,
-            enabled: enabled,
-            toggled: lit,
-            label: '오토튠',
-            hint: '누르고 있는 동안 음정이 보정됩니다',
-            excludeSemantics: true,
-            child: Listener(
-              onPointerDown: enabled ? (_) => onPressed(true) : null,
-              onPointerUp: (_) => onPressed(false),
-              onPointerCancel: (_) => onPressed(false),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 80),
-                height: 96,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: lit ? cs.primary : cs.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.graphic_eq, color: fg),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Text(
-                        '오토튠 (누르고 있기)',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context)
-                            .textTheme
-                            .titleMedium
-                            ?.copyWith(color: fg),
-                      ),
+    final iconColor = lit
+        ? kStageBg
+        : enabled
+            ? kTune
+            : kTune.withValues(alpha: 0.5);
+    final latchTip = latched ? '오토튠 고정 해제' : '오토튠 고정';
+    // 92x84 box: the pad is centred and the badge's 32dp hit area stays
+    // inside the Stack (hits outside a Stack's bounds are dropped).
+    return SizedBox(
+      width: 92,
+      height: 84,
+      child: Stack(
+        children: [
+          Positioned(
+            left: 16,
+            top: 16,
+            width: 60,
+            height: 60,
+            child: Semantics(
+              button: true,
+              enabled: enabled,
+              toggled: lit,
+              label: '오토튠',
+              hint: '누르고 있는 동안 음정이 보정됩니다',
+              excludeSemantics: true,
+              child: Listener(
+                onPointerDown: enabled ? (_) => onPressed(true) : null,
+                onPointerUp: (_) => onPressed(false),
+                onPointerCancel: (_) => onPressed(false),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 80),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: lit ? kTune : Colors.transparent,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: enabled ? kTune : kTune.withValues(alpha: 0.35),
+                      width: 2,
                     ),
-                  ],
+                    boxShadow: lit
+                        ? [
+                            BoxShadow(
+                              color: kTune.withValues(alpha: 0.6),
+                              blurRadius: 20,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Icon(Icons.graphic_eq, color: iconColor, size: 30),
                 ),
               ),
             ),
           ),
-        ),
-        const SizedBox(width: 8),
-        IconButton(
-          tooltip: latched ? '오토튠 고정 해제' : '오토튠 고정',
-          isSelected: latched,
-          icon: const Icon(Icons.lock_open),
-          selectedIcon: const Icon(Icons.lock),
-          onPressed: enabled ? () => onLatchChanged(!latched) : null,
-        ),
-      ],
-    );
-  }
-}
-
-class _LevelMeter extends StatelessWidget {
-  const _LevelMeter({required this.level});
-  final ValueListenable<double> level; // 0.0~1.0 선형 RMS
-
-  @override
-  Widget build(BuildContext context) {
-    final background = Theme.of(context).colorScheme.surfaceContainerHighest;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('입력 소리', style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 4),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: ValueListenableBuilder<double>(
-              valueListenable: level,
-              builder: (context, level, _) {
-                // dBFS 변환 (-60~0), 0이면 -60
-                final db = level > 0
-                    ? (20 * (log(level) / log(10))).clamp(-60.0, 0.0)
-                    : -60.0;
-                final fraction = ((db + 60) / 60).clamp(0.0, 1.0); // 0~1
-                final color = fraction > 0.85
-                    ? Colors.red
-                    : fraction > 0.65
-                        ? Colors.orange
-                        : Colors.greenAccent;
-                return LinearProgressIndicator(
-                  value: fraction,
-                  minHeight: 10,
-                  semanticsLabel: '입력 소리',
-                  backgroundColor: background,
-                  valueColor: AlwaysStoppedAnimation<Color>(color),
-                );
-              },
+          Positioned(
+            left: 60,
+            top: 0,
+            width: 32,
+            height: 32,
+            child: Tooltip(
+              message: latchTip,
+              child: Semantics(
+                button: true,
+                enabled: enabled,
+                toggled: latched,
+                label: latchTip,
+                excludeSemantics: true,
+                onTap: enabled ? () => onLatchChanged(!latched) : null,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: enabled ? () => onLatchChanged(!latched) : null,
+                  child: Center(
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: latched && enabled
+                            ? kTune
+                            : cs.surfaceContainerHighest,
+                        border: Border.all(
+                          color:
+                              enabled ? kTune : kTune.withValues(alpha: 0.35),
+                        ),
+                      ),
+                      child: Icon(
+                        latched ? Icons.lock : Icons.lock_open,
+                        size: 13,
+                        color: latched && enabled
+                            ? kStageBg
+                            : enabled
+                                ? kTune
+                                : kTune.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ],
@@ -1020,30 +1324,101 @@ class _LevelMeter extends StatelessWidget {
   }
 }
 
+/// Input level bar inside the stage header: neon gradient with a soft glow.
+class _LevelMeter extends StatelessWidget {
+  const _LevelMeter({required this.level});
+  final ValueListenable<double> level; // 0.0~1.0 선형 RMS
+
+  @override
+  Widget build(BuildContext context) {
+    final track = Colors.white.withValues(alpha: 0.12);
+    return ValueListenableBuilder<double>(
+      valueListenable: level,
+      builder: (context, level, _) {
+        // dBFS 변환 (-60~0), 0이면 -60
+        final db =
+            level > 0 ? (20 * (log(level) / log(10))).clamp(-60.0, 0.0) : -60.0;
+        final fraction = ((db + 60) / 60).clamp(0.0, 1.0); // 0~1
+        return Semantics(
+          label: '입력 소리',
+          value: '${(fraction * 100).round()}%',
+          child: Container(
+            height: 6,
+            decoration: BoxDecoration(
+              color: track,
+              borderRadius: BorderRadius.circular(3),
+            ),
+            alignment: Alignment.centerLeft,
+            child: FractionallySizedBox(
+              widthFactor: fraction,
+              heightFactor: 1,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(3),
+                  gradient: const LinearGradient(colors: [kNeonA, kNeonB]),
+                  boxShadow: level > 0
+                      ? [
+                          BoxShadow(
+                            color: kNeonB.withValues(alpha: 0.4),
+                            blurRadius: 12,
+                          ),
+                        ]
+                      : null,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Stage photo behind the status line. Grey and dim while idle, full colour
 /// once the mic is live, so the state reads at a glance from across the room.
 class _StageHeader extends StatelessWidget {
-  const _StageHeader({required this.running, required this.status});
+  const _StageHeader({
+    required this.running,
+    required this.status,
+    required this.level,
+  });
 
   final bool running;
   final String status;
+  final ValueListenable<double> level;
 
   // Saturation s and brightness b as a colour matrix (luma weights Rec. 709).
   static List<double> _grade(double s, double b) {
     const r = 0.2126, g = 0.7152, bl = 0.0722;
     final i = 1 - s;
     return [
-      b * (i * r + s), b * i * g, b * i * bl, 0, 0,
-      b * i * r, b * (i * g + s), b * i * bl, 0, 0,
-      b * i * r, b * i * g, b * (i * bl + s), 0, 0,
-      0, 0, 0, 1, 0,
+      b * (i * r + s),
+      b * i * g,
+      b * i * bl,
+      0,
+      0,
+      b * i * r,
+      b * (i * g + s),
+      b * i * bl,
+      0,
+      0,
+      b * i * r,
+      b * i * g,
+      b * (i * bl + s),
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
     ];
   }
 
   @override
   Widget build(BuildContext context) {
     final surface = Theme.of(context).colorScheme.surface;
-    // 150dp keeps the volume slider above the fold on a 412x915dp phone.
+    // 150dp keeps the effect sliders above the fold on a 412x915dp phone.
     return SizedBox(
       height: 150,
       child: Stack(
@@ -1064,6 +1439,7 @@ class _StageHeader extends StatelessWidget {
               excludeFromSemantics: true,
             ),
           ),
+          if (running) const _StageGlow(),
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -1078,12 +1454,23 @@ class _StageHeader extends StatelessWidget {
             left: 24,
             right: 24,
             bottom: 12,
-            child: Text(
-              status,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  status,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+                const SizedBox(height: 10),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: _LevelMeter(level: level),
+                ),
+              ],
             ),
           ),
         ],
@@ -1092,10 +1479,54 @@ class _StageHeader extends StatelessWidget {
   }
 }
 
+/// Soft neon ring pulsing behind the mic while live. Only exists while
+/// running, so no ticker runs when idle.
+class _StageGlow extends StatefulWidget {
+  const _StageGlow();
+
+  @override
+  State<_StageGlow> createState() => _StageGlowState();
+}
+
+class _StageGlowState extends State<_StageGlow>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1600),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: FadeTransition(
+        opacity: Tween<double>(begin: 0.15, end: 0.45).animate(_pulse),
+        child: const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment(0, -0.2),
+              radius: 0.6,
+              colors: [Color(0x00000000), Color(0x669B5CFF), Color(0x00000000)],
+              stops: [0.35, 0.6, 1],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Red "mic on" bar shown for the whole time the microphone is capturing
 /// (App Store guideline 2.5.14 — recording must be clearly indicated).
 class _MicLiveBanner extends StatefulWidget {
-  const _MicLiveBanner();
+  const _MicLiveBanner({required this.recording});
+
+  final bool recording;
 
   @override
   State<_MicLiveBanner> createState() => _MicLiveBannerState();
@@ -1127,22 +1558,28 @@ class _MicLiveBannerState extends State<_MicLiveBanner>
           children: [
             FadeTransition(
               opacity: Tween<double>(begin: 0.35, end: 1).animate(_pulse),
-              child: const Icon(Icons.fiber_manual_record, color: Colors.white, size: 18),
+              child: const Icon(Icons.fiber_manual_record,
+                  color: Colors.white, size: 18),
             ),
             const SizedBox(width: 8),
             const Icon(Icons.mic, color: Colors.white, size: 20),
             const SizedBox(width: 6),
-            // Wraps instead of truncating: "not recorded" must stay visible on narrow phones.
-            const Flexible(
+            // Wraps instead of truncating: whether the voice is being saved
+            // must stay visible on narrow phones.
+            Flexible(
               child: Text.rich(
                 TextSpan(children: [
-                  TextSpan(
+                  const TextSpan(
                     text: '마이크 사용 중\n',
                     style: TextStyle(fontWeight: FontWeight.w700),
                   ),
-                  TextSpan(text: '녹음하거나 저장하지 않습니다.'),
+                  TextSpan(
+                      text: widget.recording
+                          ? '녹음 중입니다. 녹음은 이 기기에만 저장됩니다.'
+                          : '녹음 버튼을 누를 때만 저장합니다.'),
                 ]),
-                style: TextStyle(color: Colors.white, fontSize: 13, height: 1.3),
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 13, height: 1.3),
               ),
             ),
           ],

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'audio_engine.dart';
+import 'ui_colors.dart';
 
 /// Lists saved recordings (Android .wav / iOS .m4a) with play, share, rename
 /// and delete. Reachable only while the engine is stopped, so playback never
@@ -48,7 +49,8 @@ class _RecordingsScreenState extends State<RecordingsScreen> {
         files = await dir
             .list()
             .where((e) =>
-                e is File && (e.path.endsWith('.wav') || e.path.endsWith('.m4a')))
+                e is File &&
+                (e.path.endsWith('.wav') || e.path.endsWith('.m4a')))
             .cast<File>()
             .toList();
         files.sort((a, b) => _name(b).compareTo(_name(a)));
@@ -75,23 +77,30 @@ class _RecordingsScreenState extends State<RecordingsScreen> {
     return i < 0 ? n : n.substring(0, i);
   }
 
-  /// `yyyyMMdd_HHmmss` -> `yyyy.MM.dd HH:mm`; null for renamed files.
-  static String? _dateFromName(String base) {
-    final m = RegExp(r'^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$').firstMatch(base);
-    if (m == null) return null;
-    return '${m[1]}.${m[2]}.${m[3]} ${m[4]}:${m[5]}';
+  static final RegExp _stamp =
+      RegExp(r'^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?:_\d+)?$');
+
+  /// Display title: native names (`yyyyMMdd_HHmmss[_N]`) read as
+  /// `M월 d일 HH:mm 녹음`; renamed files show their own name.
+  static String _title(File f) {
+    final base = _base(f);
+    final m = _stamp.firstMatch(base);
+    if (m == null) return base;
+    return '${int.parse(m[2]!)}월 ${int.parse(m[3]!)}일 ${m[4]}:${m[5]} 녹음';
   }
 
   String _subtitle(File f) {
     String size = '';
-    String date = _dateFromName(_base(f)) ?? '';
+    String date = '';
     try {
       final st = f.statSync();
       size = '${(st.size / (1024 * 1024)).toStringAsFixed(1)} MB';
-      if (date.isEmpty) {
+      // The title already carries the date unless the file was renamed.
+      if (!_stamp.hasMatch(_base(f))) {
         final d = st.modified;
         String two(int v) => v.toString().padLeft(2, '0');
-        date = '${d.year}.${two(d.month)}.${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+        date =
+            '${d.year}.${two(d.month)}.${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
       }
     } catch (_) {}
     return [date, size].where((s) => s.isNotEmpty).join(' · ');
@@ -148,8 +157,11 @@ class _RecordingsScreenState extends State<RecordingsScreen> {
           onSubmitted: (v) => Navigator.pop(ctx, v),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
-          TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text), child: const Text('확인')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              child: const Text('확인')),
         ],
       ),
     );
@@ -157,12 +169,15 @@ class _RecordingsScreenState extends State<RecordingsScreen> {
     if (newBase == null || !mounted) return;
     final name = newBase.trim();
     // Path separators / reserved chars would escape the folder or fail on FAT.
-    if (name.isEmpty || RegExp(r'[\\/:*?"<>|]').hasMatch(name) || name.startsWith('.')) {
+    if (name.isEmpty ||
+        RegExp(r'[\\/:*?"<>|]').hasMatch(name) ||
+        name.startsWith('.')) {
       _snack('사용할 수 없는 이름입니다.');
       return;
     }
     if (name == _base(f)) return;
-    final target = File('${f.parent.path}${Platform.pathSeparator}$name${_ext(f)}');
+    final target =
+        File('${f.parent.path}${Platform.pathSeparator}$name${_ext(f)}');
     if (await target.exists()) {
       if (mounted) _snack('같은 이름의 파일이 이미 있습니다.');
       return;
@@ -183,8 +198,12 @@ class _RecordingsScreenState extends State<RecordingsScreen> {
         title: const Text('녹음 삭제'),
         content: Text('${_name(f)} 파일을 삭제하시겠습니까?\n삭제한 녹음은 복구할 수 없습니다.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('삭제')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('취소')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('삭제')),
         ],
       ),
     );
@@ -205,43 +224,88 @@ class _RecordingsScreenState extends State<RecordingsScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _files.isEmpty
-              ? const Center(child: Text('저장된 녹음이 없습니다.'))
+              ? const _EmptyRecordings()
               : ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                   itemCount: _files.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  separatorBuilder: (_, __) => const SizedBox(height: 10),
                   itemBuilder: (context, i) {
                     final f = _files[i];
                     final playing = _playing == f.path;
-                    return ListTile(
-                      leading: IconButton(
-                        icon: Icon(playing ? Icons.stop : Icons.play_arrow),
-                        tooltip: playing ? '정지' : '재생',
-                        onPressed: () => _togglePlay(f),
-                      ),
-                      title: Text(_base(f)),
-                      subtitle: Text(_subtitle(f)),
-                      onTap: () => _togglePlay(f),
-                      trailing: PopupMenuButton<String>(
-                        tooltip: '더 보기',
-                        onSelected: (v) {
-                          switch (v) {
-                            case 'share':
-                              _share(f);
-                            case 'rename':
-                              _rename(f);
-                            case 'delete':
-                              _delete(f);
-                          }
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'share', child: Text('공유')),
-                          PopupMenuItem(value: 'rename', child: Text('이름 바꾸기')),
-                          PopupMenuItem(value: 'delete', child: Text('삭제')),
-                        ],
+                    return Card(
+                      margin: EdgeInsets.zero,
+                      clipBehavior: Clip.antiAlias,
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+                        leading: IconButton.filled(
+                          style: IconButton.styleFrom(
+                            backgroundColor: playing
+                                ? kNeonA
+                                : kNeonA.withValues(alpha: 0.18),
+                            foregroundColor: Colors.white,
+                          ),
+                          icon: Icon(playing
+                              ? Icons.stop_rounded
+                              : Icons.play_arrow_rounded),
+                          tooltip: playing ? '정지' : '재생',
+                          onPressed: () => _togglePlay(f),
+                        ),
+                        title: Text(_title(f),
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w600)),
+                        subtitle: Text(_subtitle(f)),
+                        onTap: () => _togglePlay(f),
+                        trailing: PopupMenuButton<String>(
+                          tooltip: '더 보기',
+                          onSelected: (v) {
+                            switch (v) {
+                              case 'share':
+                                _share(f);
+                              case 'rename':
+                                _rename(f);
+                              case 'delete':
+                                _delete(f);
+                            }
+                          },
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(value: 'share', child: Text('공유')),
+                            PopupMenuItem(
+                                value: 'rename', child: Text('이름 바꾸기')),
+                            PopupMenuItem(value: 'delete', child: Text('삭제')),
+                          ],
+                        ),
                       ),
                     );
                   },
                 ),
+    );
+  }
+}
+
+class _EmptyRecordings extends StatelessWidget {
+  const _EmptyRecordings();
+
+  @override
+  Widget build(BuildContext context) {
+    final tt = Theme.of(context).textTheme;
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.mic_none_rounded,
+                size: 56, color: kNeonA.withValues(alpha: 0.6)),
+            const SizedBox(height: 16),
+            Text('저장된 녹음이 없습니다.', style: tt.titleMedium),
+            const SizedBox(height: 6),
+            Text('노래를 시작한 뒤 녹음 버튼을 눌러 보세요.',
+                textAlign: TextAlign.center,
+                style: tt.bodyMedium?.copyWith(color: muted)),
+          ],
+        ),
+      ),
     );
   }
 }

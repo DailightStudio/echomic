@@ -56,15 +56,17 @@ public:
         maxSamples_ = static_cast<int64_t>(maxSeconds) * sampleRate * channels;
         samplesWritten_.store(0);
         overruns_.store(0);
+        ended_.store(false);
         // Consumer owns tail_: discard anything a stale push left behind.
         tail_.store(head_.load(std::memory_order_acquire), std::memory_order_release);
+        recording_.store(true, std::memory_order_release);
         active_.store(true, std::memory_order_release);
         writer_ = std::thread(&Recorder::writerLoop, this);
         return true;
     }
 
     void stop(const char *reason) {
-        if (active_.exchange(false)) setReason(reason ? reason : "user");
+        end(reason ? reason : "user");
         if (writer_.joinable()) writer_.join();
     }
 
@@ -82,7 +84,10 @@ public:
         head_.store(head + n, std::memory_order_release);
     }
 
-    bool isRecording() const { return active_.load(); }
+    // Flips false only after the final drain + header patch, and after the
+    // reason is published: a reader that sees false sees the final
+    // lastReason()/durationMs().
+    bool isRecording() const { return recording_.load(std::memory_order_acquire); }
     int64_t durationMs() const {
         const int64_t frames = samplesWritten_.load() / (channels_ > 0 ? channels_ : 1);
         return sampleRate_ > 0 ? frames * 1000 / sampleRate_ : 0;
@@ -107,10 +112,12 @@ private:
         reason_ = r;
     }
 
-    // Ends the recording from the writer thread (cap/error); a concurrent
-    // stop() that already flipped active_ keeps its own reason.
-    void endSelf(const char *reason) {
-        if (active_.exchange(false)) setReason(reason);
+    // First caller (stop() or the writer's cap/error) wins: publishes its
+    // reason, then signals the producer/writer via active_.
+    void end(const char *reason) {
+        if (ended_.exchange(true)) return;
+        setReason(reason);
+        active_.store(false, std::memory_order_release);
     }
 
     // Returns false on a write error.
@@ -146,11 +153,12 @@ private:
         bool ok = true;
         while (active_.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            if (!drain()) { ok = false; endSelf("error"); break; }
-            if (samplesWritten_.load() >= maxSamples_) { endSelf("cap"); break; }
+            if (!drain()) { ok = false; end("error"); break; }
+            if (samplesWritten_.load() >= maxSamples_) { end("cap"); break; }
         }
         if (ok) drain();  // whatever arrived before active_ flipped
         finalize();
+        recording_.store(false, std::memory_order_release);
     }
 
     static void put32(uint8_t *p, uint32_t v) {
@@ -182,7 +190,9 @@ private:
     std::unique_ptr<float[]> ring_;
     std::atomic<size_t> head_{0};  // producer (audio thread)
     std::atomic<size_t> tail_{0};  // consumer (writer thread)
-    std::atomic<bool> active_{false};
+    std::atomic<bool> active_{false};     // producer gate / writer loop condition
+    std::atomic<bool> ended_{true};       // end() claimed; true while idle
+    std::atomic<bool> recording_{false};  // public state; false after finalize
     std::atomic<int64_t> samplesWritten_{0};
     std::atomic<uint32_t> overruns_{0};
 

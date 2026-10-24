@@ -334,6 +334,10 @@ void AudioEngine::onErrorAfterClose(oboe::AudioStream * /*stream*/,
         if (!running_.load()) return;  // already stopped/superseded
         myGeneration = generation_.load();
 
+        // Streams are torn down inline here (not via closeStreams()), and
+        // the restart reopens them possibly with a different rate/channel
+        // count: end the recording now so the WAV never spans formats.
+        recorder_.stop("engine");
         outputStream_.reset();
         duplex_.setOutputStream(nullptr);
         // We own stopping/closing the input stream, the errored output's

@@ -120,7 +120,14 @@ final class AudioEnginePlugin: NSObject {
             let fmt = DateFormatter()
             fmt.locale = Locale(identifier: "en_US_POSIX")
             fmt.dateFormat = "yyyyMMdd_HHmmss"
-            let path = dir.appendingPathComponent(fmt.string(from: Date()) + ".m4a").path
+            // 1 s resolution + AVAudioFile(forWriting:) truncation: never reuse a name.
+            let stem = fmt.string(from: Date())
+            var path = dir.appendingPathComponent(stem + ".m4a").path
+            var n = 2
+            while FileManager.default.fileExists(atPath: path) {
+                path = dir.appendingPathComponent("\(stem)_\(n).m4a").path
+                n += 1
+            }
             result(engine.startRecording(path: path,
                                          maxSeconds: AudioEnginePlugin.maxRecordSeconds))
         case "stopRecording":
