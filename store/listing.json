@@ -32,8 +32,10 @@
       ]
     },
     "play_phone": [
-      "../assets/play/phone_2_caption.png",
-      "../assets/play/phone_1_home.png"
+      "../assets/play/phone_1_v104.png",
+      "../assets/play/phone_2_v104.png",
+      "../assets/play/phone_3_v104.png",
+      "../assets/play/phone_4_v104.png"
     ],
     "play_icon": "../assets/icon/play_icon_512.png",
     "play_feature": "../assets/play/feature_1024x500.png"
