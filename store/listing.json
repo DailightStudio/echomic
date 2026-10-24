@@ -28,7 +28,10 @@
   "screenshots": {
     "ios": {
       "APP_IPHONE_67": [
-        "../assets/screenshots/iphone69_home.png"
+        "../assets/screenshots/ios69_1.png",
+        "../assets/screenshots/ios69_2.png",
+        "../assets/screenshots/ios69_3.png",
+        "../assets/screenshots/ios69_4.png"
       ]
     },
     "play_phone": [
