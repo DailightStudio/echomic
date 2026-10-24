@@ -159,6 +159,7 @@ bool AudioEngine::openStreams() {
     freqShifter_.prepare(static_cast<float>(sampleRate_));
     eq_.prepare(static_cast<float>(sampleRate_));
     suppressor_.prepare(static_cast<float>(sampleRate_), channelCount_);
+    tuner_.prepare(static_cast<float>(sampleRate_), channelCount_);  // also resets
 
     // Scratch buffer the DSP chain processes in place, sized to the same
     // bound FullDuplexStream uses for its own internal input buffer so a
@@ -243,7 +244,7 @@ void AudioEngine::runDsp(float *buf, int numFrames) {
     const int channels = channelCount_;
     const int sampleCount = numFrames * channels;
 
-    // Signal flow: HPF -> Gate -> Comp -> Echo -> Suppressor -> FreqShifter
+    // Signal flow: HPF -> Gate -> Comp -> Tune -> Echo -> Suppressor -> FreqShifter
     // -> EQ -> Reverb -> Master -> Limiter. The limiter runs last (after
     // master gain), per the audio-dsp-review audit, so it is the final
     // safety ceiling on exactly what reaches the output -- nothing after it
@@ -258,6 +259,9 @@ void AudioEngine::runDsp(float *buf, int numFrames) {
         // so no envelope-follower gain reduction is applied either.
         comp_.process(buf, numFrames, channels, /*applyMakeup=*/true);
     }
+    // Momentary auto-tune: before echo so echo/reverb tails repeat the
+    // corrected note. Pure copy-through (zero latency) while not held.
+    tuner_.process(buf, numFrames, channels);
     const bool aec = speakerAecActive_.load();
     float g = boost ? gain_.load() : 1.0f;
     if (aec) g = std::min(g, kSpeakerMaxGain);

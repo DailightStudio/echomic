@@ -18,6 +18,7 @@
 #include "eq5band.h"
 #include "feedback_suppressor.h"
 #include "recorder.h"
+#include "pitch_corrector.h"
 
 /**
  * Full-duplex low-latency engine built on Oboe's FullDuplexStream helper.
@@ -56,6 +57,7 @@ public:
     void setGateThreshold(float db)         { gate_.setThresholdDb(db); }
     void setEQBand(int band, float gainDb)   { eq_.setBandGain(band, gainDb); }
     void setFrequencyShiftEnabled(bool en)   { freqShifter_.enabled.store(en); }
+    void setAutotuneHold(bool on)            { tuner_.setHold(on); }
     // Records the post-limiter output to a WAV at `path`. Ends on
     // stopRecording(), maxSeconds, or any closeStreams() (reason "engine").
     bool startRecording(const char *path, int maxSeconds);
@@ -126,6 +128,7 @@ private:
     FrequencyShifter freqShifter_;
     EQ5Band eq_;
     FeedbackSuppressor suppressor_;
+    PitchCorrector tuner_;
     Recorder recorder_;
     std::atomic<float> masterGain_{1.0f};
     std::atomic<float> rmsLevel_{0.0f};

@@ -30,3 +30,8 @@ iOS 는 ATT 를 묻지 않고 비맞춤 광고만 요청합니다. 문의: wjs92
 - 이벤트: SDK 자동(first_open, session_start, user_engagement, app_remove) + echo_start, echo_stop, start_failed, preset_select (lib/analytics.dart)
 - Play 데이터 보안: 기존 답변(기기 ID, 대략적 위치, 앱 상호작용, 진단 / 용도 분석 포함)으로 덮임 — 변경 없음
 - ASC 라벨: 기기 ID 용도에 '분석' 추가 필요(1.0.3 제출 전), 사용자와 연결 안 됨, 추적 없음
+
+## 1.0.4 녹음 + 오토튠
+- 출시 노트: 효과가 들어간 내 목소리 녹음(목록에서 재생, 공유, 이름 바꾸기, 삭제), 누르는 동안만 켜지는 오토튠 패드
+- 녹음 파일은 기기 안 앱 전용 폴더에만 저장되고 서버로 안 감 → Play 데이터 보안 / ASC 개인정보 라벨 변경 없음으로 판단(사장님이 콘솔에서 확인)
+- 이벤트 추가: record_start, record_stop, autotune_hold
