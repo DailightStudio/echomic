@@ -17,6 +17,8 @@ final class AudioEnginePlugin: NSObject {
     // transition the engine makes on its own) -- never trust a single
     // source for this so Dart's UI can't drift from the real engine state.
     private var expectedRunning = false
+    // Last recording state reported to Dart; a flip emits a 'record' event.
+    private var lastRecording = false
 
     static func register(with messenger: FlutterBinaryMessenger) {
         let channel = FlutterMethodChannel(name: channelName,
@@ -93,9 +95,52 @@ final class AudioEnginePlugin: NSObject {
                 engine.setSpeakerAec(enabled)
             }
             result(nil)
+        case "recordingsDir":
+            if let dir = recordingsDir() {
+                result(dir.path)
+            } else {
+                result(FlutterError(code: "no_dir", message: "Cannot create Recordings folder", details: nil))
+            }
+        case "startRecording":
+            guard let dir = recordingsDir() else {
+                result(FlutterError(code: "no_dir", message: "Cannot create Recordings folder", details: nil))
+                return
+            }
+            let free = (try? dir.resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+                .volumeAvailableCapacityForImportantUsage ?? 0
+            if free < AudioEnginePlugin.minFreeBytes {
+                result(FlutterError(code: "disk_full", message: "Less than 200 MB free", details: nil))
+                return
+            }
+            let fmt = DateFormatter()
+            fmt.locale = Locale(identifier: "en_US_POSIX")
+            fmt.dateFormat = "yyyyMMdd_HHmmss"
+            let path = dir.appendingPathComponent(fmt.string(from: Date()) + ".m4a").path
+            result(engine.startRecording(path: path,
+                                         maxSeconds: AudioEnginePlugin.maxRecordSeconds))
+        case "stopRecording":
+            engine.stopRecording(reason: "user")
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+
+    private static let minFreeBytes: Int64 = 200 * 1024 * 1024
+    private static let maxRecordSeconds = 600
+
+    /// Documents/Recordings (app-private; not exposed to the Files app).
+    private func recordingsDir() -> URL? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory,
+                                                  in: .userDomainMask).first else { return nil }
+        let dir = docs.appendingPathComponent("Recordings", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+        return dir
     }
 
     private func doubleArg(_ call: FlutterMethodCall, _ key: String) -> Double? {
@@ -139,6 +184,18 @@ final class AudioEnginePlugin: NSObject {
             // 레벨 이벤트 (Float -> Double: StandardMessageCodec 는 Double 만 직렬화)
             if running {
                 sink(["type": "level", "rms": Double(self.engine.currentRMSLevel)])
+            }
+            // 녹음 상태 변화: engine stops it on its own (cap, engine stop)
+            let recording = self.engine.isRecording
+            if recording != self.lastRecording {
+                self.lastRecording = recording
+                var event: [String: Any] = ["type": "record", "recording": recording]
+                if let path = self.engine.lastRecordingPath { event["path"] = path }
+                if !recording {
+                    event["durationMs"] = self.engine.recordingDurationMs
+                    event["reason"] = self.engine.lastRecordStopReason ?? "engine"
+                }
+                sink(event)
             }
         }
     }

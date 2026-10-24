@@ -9,6 +9,7 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import android.os.StatFs
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
@@ -16,6 +17,10 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Bridges the Dart MethodChannel to the native Oboe engine via JNI.
@@ -29,6 +34,10 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private var eventSink: EventChannel.EventSink? = null
     private var pollingHandler: android.os.Handler? = null
     private var expectedRunning = false
+
+    // Recording state seen by the poll loop; a flip emits a 'record' event.
+    private var lastRecording = false
+    private var lastRecordingPath: String? = null
 
     // Fires just before the active output route disappears (e.g. wired
     // headset unplugged) and audio would otherwise fall back to the
@@ -165,6 +174,23 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 applyDesiredMode()
                 result.success(null)
             }
+            "recordingsDir" -> result.success(recordingsDir().absolutePath)
+            "startRecording" -> {
+                val dir = recordingsDir()
+                if (StatFs(dir.absolutePath).availableBytes < MIN_FREE_BYTES) {
+                    result.error("disk_full", "Less than 200 MB free", null)
+                    return
+                }
+                val name = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".wav"
+                val path = File(dir, name).absolutePath
+                val ok = nativeStartRecording(path, MAX_RECORD_SECONDS)
+                if (ok) lastRecordingPath = path
+                result.success(ok)
+            }
+            "stopRecording" -> {
+                nativeStopRecording()
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
     }
@@ -188,11 +214,29 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                     val rms = nativeGetRmsLevel()
                     sink.success(mapOf("type" to "level", "rms" to rms.toDouble()))
                 }
+                // 녹음 상태 변화: native stops it on its own (cap, engine stop)
+                val recording = nativeIsRecording()
+                if (recording != lastRecording) {
+                    lastRecording = recording
+                    sink.success(
+                        if (recording) mapOf("type" to "record", "recording" to true, "path" to lastRecordingPath)
+                        else mapOf(
+                            "type" to "record",
+                            "recording" to false,
+                            "path" to lastRecordingPath,
+                            "durationMs" to nativeRecordingDurationMs(),
+                            "reason" to nativeRecordingStopReason(),
+                        )
+                    )
+                }
                 pollingHandler?.postDelayed(this, 50)
             }
         }
         pollingHandler?.post(runnable)
     }
+
+    private fun recordingsDir(): File =
+        File(appContext.filesDir, "recordings").apply { mkdirs() }
 
     private fun stopPolling() {
         pollingHandler?.removeCallbacksAndMessages(null)
@@ -331,6 +375,11 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private external fun nativeSetFrequencyShift(enabled: Boolean)
     private external fun nativeSetSpeakerAec(on: Boolean)
     private external fun nativeIsSpeakerAecActive(): Boolean
+    private external fun nativeStartRecording(path: String, maxSeconds: Int): Boolean
+    private external fun nativeStopRecording()
+    private external fun nativeIsRecording(): Boolean
+    private external fun nativeRecordingDurationMs(): Long
+    private external fun nativeRecordingStopReason(): String
 
     companion object {
         private const val CHANNEL = "com.dailightstudio.echomic/audio"
@@ -339,6 +388,9 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         // Start refused because the app is not in the foreground. Also the
         // 'state' event reason when Android refuses startForeground() later.
         private const val ERR_BACKGROUND = "background"
+
+        private const val MIN_FREE_BYTES = 200L * 1024 * 1024
+        private const val MAX_RECORD_SECONDS = 600
 
         init {
             System.loadLibrary("echomic_engine")

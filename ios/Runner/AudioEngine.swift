@@ -224,6 +224,21 @@ final class AudioEngine: NSObject {
     /// running:false so the UI can say what actually happened.
     private(set) var lastStopReason: String?
 
+    // MARK: Recording state
+    // The limiter tap block runs on an AVAudioEngine-internal (non-render)
+    // thread; recFile/recFrames/recToken are shared with the main thread and
+    // guarded by recLock. isRecording/lastRecording* are main-thread only.
+    private let recLock = NSLock()
+    private var recFile: AVAudioFile?
+    private var recFrames: AVAudioFramePosition = 0
+    private var recMaxFrames: AVAudioFramePosition = 0
+    private var recSampleRate: Double = 48000
+    private var recToken = 0
+    private var recTapInstalled = false
+    private(set) var isRecording = false
+    private(set) var lastRecordingPath: String?
+    private(set) var lastRecordStopReason: String?
+
     // MARK: - Parameters
 
     // Hard ceiling at 4x: beyond that the compressor makeup + echo feed and
@@ -433,6 +448,105 @@ final class AudioEngine: NSObject {
         internalStop(keepObservers: false)
     }
 
+    // MARK: - Recording (post-limiter = exactly what reaches the output)
+
+    /// Starts writing the limiter output to an AAC .m4a at `path`. Main thread.
+    func startRecording(path: String, maxSeconds: Int) -> Bool {
+        guard isRunning, !isRecording else { return false }
+        let fmt = limiter.outputFormat(forBus: 0)
+        guard fmt.sampleRate > 0, fmt.channelCount > 0 else { return false }
+        let url = URL(fileURLWithPath: path)
+        var settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: fmt.sampleRate,
+            AVNumberOfChannelsKey: Int(fmt.channelCount),
+            AVEncoderBitRateKey: 96000,
+        ]
+        var file = try? AVAudioFile(forWriting: url, settings: settings,
+                                    commonFormat: .pcmFormatFloat32,
+                                    interleaved: fmt.isInterleaved)
+        if file == nil {
+            // Low route rates (e.g. 16 kHz HFP) may reject 96 kbps; let the
+            // encoder pick its default bitrate instead.
+            settings.removeValue(forKey: AVEncoderBitRateKey)
+            try? FileManager.default.removeItem(at: url)
+            file = try? AVAudioFile(forWriting: url, settings: settings,
+                                    commonFormat: .pcmFormatFloat32,
+                                    interleaved: fmt.isInterleaved)
+        }
+        guard let recordFile = file else {
+            NSLog("echomic: cannot create recording file at \(path)")
+            return false
+        }
+
+        recLock.lock()
+        recToken += 1
+        let token = recToken
+        recFile = recordFile
+        recFrames = 0
+        recSampleRate = fmt.sampleRate
+        recMaxFrames = AVAudioFramePosition(fmt.sampleRate * Double(max(maxSeconds, 1)))
+        recLock.unlock()
+
+        limiter.installTap(onBus: 0, bufferSize: 4096, format: fmt) { [weak self] buffer, _ in
+            self?.writeTapBuffer(buffer, token: token)
+        }
+        recTapInstalled = true
+        isRecording = true
+        lastRecordingPath = path
+        lastRecordStopReason = nil
+        return true
+    }
+
+    /// Tap thread: append one buffer. Closes the file and hands the stop to
+    /// the main thread on cap or write error.
+    private func writeTapBuffer(_ buffer: AVAudioPCMBuffer, token: Int) {
+        var stopReason: String?
+        recLock.lock()
+        if token == recToken, let file = recFile {
+            do {
+                try file.write(from: buffer)
+                recFrames += AVAudioFramePosition(buffer.frameLength)
+                if recFrames >= recMaxFrames { stopReason = "cap" }
+            } catch {
+                stopReason = "error"
+            }
+            if stopReason != nil { recFile = nil }  // releasing closes the file
+        }
+        recLock.unlock()
+        if let reason = stopReason {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.recLock.lock()
+                let current = self.recToken == token
+                self.recLock.unlock()
+                if current { self.stopRecording(reason: reason) }
+            }
+        }
+    }
+
+    /// Main thread. `removeTap` is false only after mediaServicesWereReset,
+    /// when the old engine/nodes must not be called into.
+    func stopRecording(reason: String, removeTap: Bool = true) {
+        guard isRecording else { return }
+        if removeTap && recTapInstalled { limiter.removeTap(onBus: 0) }
+        recTapInstalled = false
+        recLock.lock()
+        recToken += 1     // late tap blocks / pending cap dispatches become no-ops
+        recFile = nil     // releasing the AVAudioFile finalizes the .m4a
+        recLock.unlock()
+        isRecording = false
+        lastRecordStopReason = reason
+    }
+
+    /// Duration of the current (or last finished) recording.
+    var recordingDurationMs: Int {
+        recLock.lock()
+        defer { recLock.unlock() }
+        guard recSampleRate > 0 else { return 0 }
+        return Int(Double(recFrames) * 1000.0 / recSampleRate)
+    }
+
     /// Current output route class + round-trip latency estimate for the UI.
     /// `output`: "speaker" | "wired" | "bluetooth" | "other".
     func routeInfo() -> [String: Any] {
@@ -475,6 +589,7 @@ final class AudioEngine: NSObject {
     /// us; auto-resume from a stopped state is intentionally not implemented
     /// (see the session observers below).
     private func internalStop(keepObservers: Bool) {
+        stopRecording(reason: "engine")
         if !keepObservers {
             removeSessionObservers()
         }
@@ -515,6 +630,7 @@ final class AudioEngine: NSObject {
     /// after mediaServicesWereReset, where the existing engine/session
     /// objects are already invalid and must not be called into.
     private func resetLocalState() {
+        stopRecording(reason: "engine", removeTap: false)
         sinkNode = nil
         sourceNode = nil
         ringBuffer = nil

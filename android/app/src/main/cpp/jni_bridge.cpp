@@ -1,6 +1,7 @@
 #include <jni.h>
 
 #include <memory>
+#include <string>
 
 #include "audio_engine.h"
 
@@ -131,6 +132,42 @@ JNIEXPORT jboolean JNICALL
 Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeIsSpeakerAecActive(
     JNIEnv * /*env*/, jobject /*thiz*/) {
     return (gEngine && gEngine->isSpeakerAecActive()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeStartRecording(
+    JNIEnv *env, jobject /*thiz*/, jstring path, jint maxSeconds) {
+    if (!gEngine || !path) return JNI_FALSE;
+    const char *cPath = env->GetStringUTFChars(path, nullptr);
+    if (!cPath) return JNI_FALSE;
+    const bool ok = gEngine->startRecording(cPath, static_cast<int>(maxSeconds));
+    env->ReleaseStringUTFChars(path, cPath);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeStopRecording(
+    JNIEnv * /*env*/, jobject /*thiz*/) {
+    if (gEngine) gEngine->stopRecording("user");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeIsRecording(
+    JNIEnv * /*env*/, jobject /*thiz*/) {
+    return (gEngine && gEngine->isRecording()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeRecordingDurationMs(
+    JNIEnv * /*env*/, jobject /*thiz*/) {
+    return gEngine ? static_cast<jlong>(gEngine->recordingDurationMs()) : 0;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeRecordingStopReason(
+    JNIEnv *env, jobject /*thiz*/) {
+    const std::string reason = gEngine ? gEngine->recordingStopReason() : std::string();
+    return env->NewStringUTF(reason.c_str());
 }
 
 // Same gEngine->isRunning() query as AudioEnginePlugin's nativeIsRunning,

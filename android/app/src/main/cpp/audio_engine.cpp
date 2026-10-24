@@ -191,6 +191,17 @@ bool AudioEngine::openStreams() {
     return true;
 }
 
+bool AudioEngine::startRecording(const char *path, int maxSeconds) {
+    std::lock_guard<std::mutex> lock(lifecycleLock_);
+    if (!running_.load()) return false;
+    return recorder_.start(path, sampleRate_, channelCount_, maxSeconds);
+}
+
+void AudioEngine::stopRecording(const char *reason) {
+    std::lock_guard<std::mutex> lock(lifecycleLock_);
+    recorder_.stop(reason);
+}
+
 double AudioEngine::getLatencyMs() {
     std::lock_guard<std::mutex> lock(lifecycleLock_);
     if (!running_.load() || !inputStream_ || !outputStream_) return -1.0;
@@ -211,6 +222,8 @@ void AudioEngine::closeStreams() {
     // close() on the output waited to join it (ANR seen on the emulator,
     // main thread in AudioTrack::stopAndJoinCallbacks). Same order as Oboe's
     // LiveEffect sample.
+    // Recording ends with the streams (stop, reconnect, mode switch).
+    recorder_.stop("engine");
     if (outputStream_) {
         outputStream_->requestStop();
         outputStream_->close();
@@ -263,6 +276,7 @@ void AudioEngine::runDsp(float *buf, int numFrames) {
 
     // Limiter: always-on safety ceiling, independent of boost.
     comp_.limit(buf, sampleCount);
+    recorder_.push(buf, sampleCount);
 
     // RMS 계산 (UI 폴링용) -- reflects the final, post-limiter signal.
     if (sampleCount > 0) {

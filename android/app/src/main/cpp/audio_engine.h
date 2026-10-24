@@ -17,6 +17,7 @@
 #include "frequency_shifter.h"
 #include "eq5band.h"
 #include "feedback_suppressor.h"
+#include "recorder.h"
 
 /**
  * Full-duplex low-latency engine built on Oboe's FullDuplexStream helper.
@@ -55,6 +56,13 @@ public:
     void setGateThreshold(float db)         { gate_.setThresholdDb(db); }
     void setEQBand(int band, float gainDb)   { eq_.setBandGain(band, gainDb); }
     void setFrequencyShiftEnabled(bool en)   { freqShifter_.enabled.store(en); }
+    // Records the post-limiter output to a WAV at `path`. Ends on
+    // stopRecording(), maxSeconds, or any closeStreams() (reason "engine").
+    bool startRecording(const char *path, int maxSeconds);
+    void stopRecording(const char *reason);
+    bool isRecording() const              { return recorder_.isRecording(); }
+    int64_t recordingDurationMs() const   { return recorder_.durationMs(); }
+    std::string recordingStopReason()     { return recorder_.lastReason(); }
     // Speaker mode: VoiceCommunication input preset (platform AEC) plus
     // gain caps. Live-switches the streams if the engine is running.
     void setSpeakerAecDesired(bool on);
@@ -118,6 +126,7 @@ private:
     FrequencyShifter freqShifter_;
     EQ5Band eq_;
     FeedbackSuppressor suppressor_;
+    Recorder recorder_;
     std::atomic<float> masterGain_{1.0f};
     std::atomic<float> rmsLevel_{0.0f};
     std::atomic<float> gain_{1.0f};
