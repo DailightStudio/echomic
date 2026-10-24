@@ -88,6 +88,10 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _busy = false;
   bool _recording = false;
   DateTime? _recStart;
+  // Momentary auto-tune: on while the pad is pressed or the latch is set.
+  bool _tunePressed = false;
+  bool _tuneLatched = false;
+  DateTime? _tuneStart;
   // Elapsed recording seconds; ticked from the 50 ms level event so only the
   // record button label rebuilds.
   final ValueNotifier<int> _recSeconds = ValueNotifier(0);
@@ -173,6 +177,7 @@ class _HomeScreenState extends State<HomeScreen> {
             } else if (!running && _running) {
               _engine.stop(); // make sure nothing is left capturing
               WakelockPlus.disable();
+              _endTune();
               final started = _sessionStart;
               Analytics.echoStop(reason ?? 'unknown',
                   started == null ? null : DateTime.now().difference(started));
@@ -413,6 +418,36 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  bool get _tuneOn => _tunePressed || _tuneLatched;
+
+  // Applies a press/latch change and tells native only on an on/off edge, so
+  // pressing the pad while latched neither re-sends nor logs a second hold.
+  void _setTune({bool? pressed, bool? latched}) {
+    final wasOn = _tuneOn;
+    setState(() {
+      _tunePressed = pressed ?? _tunePressed;
+      _tuneLatched = latched ?? _tuneLatched;
+    });
+    final on = _tuneOn;
+    if (on == wasOn) return;
+    _engine.setAutotuneHold(on).catchError(
+        (Object e) => debugPrint('setAutotuneHold failed: $e'));
+    if (on) {
+      _tuneStart = DateTime.now();
+    } else {
+      final started = _tuneStart;
+      _tuneStart = null;
+      if (started != null) {
+        Analytics.autotuneHold(DateTime.now().difference(started).inMilliseconds);
+      }
+    }
+  }
+
+  // Engine stopped: drop press/latch so the next session starts dry.
+  void _endTune() {
+    if (_tuneOn) _setTune(pressed: false, latched: false);
+  }
+
   Future<void> _toggle() async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -422,6 +457,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (_running) {
         await _engine.stop();
         WakelockPlus.disable();
+        _endTune();
         setState(() {
           _running = false;
           _speakerAec = false;
@@ -572,6 +608,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: cs.error),
                   ),
                 ),
+              _AutotunePad(
+                enabled: _running,
+                active: _tuneOn,
+                latched: _tuneLatched,
+                onPressed: (down) => _setTune(pressed: down),
+                onLatchChanged: (on) => _setTune(latched: on),
+              ),
+              const SizedBox(height: 12),
               _LevelMeter(level: _rmsLevel),
               const SizedBox(height: 12),
               // Presets as a single-select row; the active one stays lit until a
@@ -842,6 +886,89 @@ class _SliderTile extends StatelessWidget {
             onChanged: onChanged,
             onChangeEnd: onChangeEnd,
           ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Press-and-hold auto-tune pad. Lit while held or latched; the lock button
+/// keeps it on hands-free (and is the screen-reader path, since a long press
+/// is awkward there).
+class _AutotunePad extends StatelessWidget {
+  const _AutotunePad({
+    required this.enabled,
+    required this.active,
+    required this.latched,
+    required this.onPressed,
+    required this.onLatchChanged,
+  });
+
+  final bool enabled;
+  final bool active;
+  final bool latched;
+  final ValueChanged<bool> onPressed;
+  final ValueChanged<bool> onLatchChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final lit = enabled && active;
+    final fg = !enabled
+        ? cs.onSurface.withValues(alpha: 0.38)
+        : lit
+            ? cs.onPrimary
+            : cs.onSurfaceVariant;
+    return Row(
+      children: [
+        Expanded(
+          child: Semantics(
+            button: true,
+            enabled: enabled,
+            toggled: lit,
+            label: '오토튠',
+            hint: '누르고 있는 동안 음정이 보정됩니다',
+            excludeSemantics: true,
+            child: Listener(
+              onPointerDown: enabled ? (_) => onPressed(true) : null,
+              onPointerUp: (_) => onPressed(false),
+              onPointerCancel: (_) => onPressed(false),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 80),
+                height: 96,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: lit ? cs.primary : cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.graphic_eq, color: fg),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        '오토튠 (누르고 있기)',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(color: fg),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          tooltip: latched ? '오토튠 고정 해제' : '오토튠 고정',
+          isSelected: latched,
+          icon: const Icon(Icons.lock_open),
+          selectedIcon: const Icon(Icons.lock),
+          onPressed: enabled ? () => onLatchChanged(!latched) : null,
         ),
       ],
     );

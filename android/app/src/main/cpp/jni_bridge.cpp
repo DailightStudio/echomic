@@ -128,6 +128,12 @@ Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetSpeakerAec(
     if (gEngine) gEngine->setSpeakerAecDesired(on == JNI_TRUE);
 }
 
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetAutotuneHold(
+    JNIEnv * /*env*/, jobject /*thiz*/, jboolean on) {
+    if (gEngine) gEngine->setAutotuneHold(on == JNI_TRUE);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeIsSpeakerAecActive(
     JNIEnv * /*env*/, jobject /*thiz*/) {

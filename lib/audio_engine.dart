@@ -104,6 +104,11 @@ class AudioEngine {
     await _channel.invokeMethod<void>('setSpeakerAec', {'enabled': enabled});
   }
 
+  /// Momentary auto-tune: true while the pad is held (20 ms crossfade in native).
+  Future<void> setAutotuneHold(bool on) async {
+    await _channel.invokeMethod<void>('setAutotuneHold', {'on': on});
+  }
+
   /// Folder (app-private) where the native engine writes recordings.
   Future<String> recordingsDir() async {
     return (await _channel.invokeMethod<String>('recordingsDir'))!;

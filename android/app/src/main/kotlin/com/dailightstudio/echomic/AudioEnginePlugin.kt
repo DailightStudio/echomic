@@ -174,6 +174,10 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 applyDesiredMode()
                 result.success(null)
             }
+            "setAutotuneHold" -> {
+                nativeSetAutotuneHold(call.argument<Boolean>("on") ?: false)
+                result.success(null)
+            }
             "recordingsDir" -> result.success(recordingsDir().absolutePath)
             "startRecording" -> {
                 val dir = recordingsDir()
@@ -374,6 +378,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private external fun nativeSetBoost(enabled: Boolean)
     private external fun nativeSetFrequencyShift(enabled: Boolean)
     private external fun nativeSetSpeakerAec(on: Boolean)
+    private external fun nativeSetAutotuneHold(on: Boolean)
     private external fun nativeIsSpeakerAecActive(): Boolean
     private external fun nativeStartRecording(path: String, maxSeconds: Int): Boolean
     private external fun nativeStopRecording()
