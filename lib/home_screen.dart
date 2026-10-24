@@ -12,6 +12,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'ads.dart';
 import 'analytics.dart';
 import 'audio_engine.dart';
+import 'recordings_screen.dart';
 
 // Echo/reverb presets. The first one (karaoke) is also the fresh-install
 // default, so the first Start already sounds like one.
@@ -85,6 +86,11 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _running = false;
   DateTime? _sessionStart;
   bool _busy = false;
+  bool _recording = false;
+  DateTime? _recStart;
+  // Elapsed recording seconds; ticked from the 50 ms level event so only the
+  // record button label rebuilds.
+  final ValueNotifier<int> _recSeconds = ValueNotifier(0);
   // Short state for the stage header; _hint carries the sentence that says
   // what to do, below it, where it can wrap at any font size.
   String _status = '대기 중';
@@ -125,6 +131,27 @@ class _HomeScreenState extends State<HomeScreen> {
           if (type == 'level') {
             final rms = (event['rms'] as double? ?? 0.0).clamp(0.0, 1.0);
             if ((rms - _rmsLevel.value).abs() > 0.005) _rmsLevel.value = rms;
+            final recStart = _recStart;
+            if (recStart != null) {
+              _recSeconds.value = DateTime.now().difference(recStart).inSeconds;
+            }
+          } else if (type == 'record') {
+            final rec = event['recording'] as bool? ?? false;
+            if (!rec && _recording) {
+              final reason = event['reason'] as String? ?? 'unknown';
+              Analytics.recordStop(
+                  reason, (event['durationMs'] as num?)?.toInt() ?? 0);
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(reason == 'cap'
+                    ? '최대 녹음 시간에 도달하여 녹음을 저장했습니다.'
+                    : '녹음을 저장했습니다.'),
+                duration: const Duration(seconds: 3),
+              ));
+            }
+            if (rec && !_recording) _recStart = DateTime.now();
+            if (!rec) _recStart = null;
+            _recSeconds.value = 0;
+            setState(() => _recording = rec);
           } else if (type == 'route') {
             _applyRoute(RouteInfo.fromMap(event));
             _refreshRouteAfterSwitch();
@@ -184,6 +211,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _eventSub?.cancel();
     _rmsLevel.dispose();
+    _recSeconds.dispose();
     for (final t in _pendingSend.values) {
       t.cancel();
     }
@@ -362,6 +390,29 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _toggleRecording() async {
+    // The native side reports start/stop through the 'record' event; the
+    // UI follows that event rather than these calls.
+    try {
+      if (_recording) {
+        await _engine.stopRecording();
+        return;
+      }
+      final ok = await _engine.startRecording();
+      if (!mounted) return;
+      if (ok) {
+        Analytics.recordStart();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('저장 공간이 부족하여 녹음을 시작할 수 없습니다.'),
+          duration: Duration(seconds: 3),
+        ));
+      }
+    } catch (e) {
+      debugPrint('recording toggle failed: $e');
+    }
+  }
+
   Future<void> _toggle() async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -482,6 +533,17 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('에코마이크'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.library_music),
+            tooltip: '녹음 목록',
+            onPressed: _running
+                ? null
+                : () => Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => const RecordingsScreen(),
+                    )),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
@@ -688,16 +750,41 @@ class _HomeScreenState extends State<HomeScreen> {
               padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
               child: SizedBox(
                 height: 64,
-                child: FilledButton.icon(
-                  onPressed: _busy ? null : _toggle,
-                  icon: Icon(_running ? Icons.stop : Icons.play_arrow),
-                  label: Text(
-                    _running ? '정지' : '시작',
-                    style: const TextStyle(fontSize: 20),
-                  ),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: _running ? cs.error : cs.primary,
-                  ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _busy ? null : _toggle,
+                        icon: Icon(_running ? Icons.stop : Icons.play_arrow),
+                        label: Text(
+                          _running ? '정지' : '시작',
+                          style: const TextStyle(fontSize: 20),
+                        ),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: _running ? cs.error : cs.primary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    OutlinedButton.icon(
+                      onPressed: _running ? _toggleRecording : null,
+                      icon: Icon(
+                        _recording ? Icons.stop : Icons.fiber_manual_record,
+                        color: _running ? Colors.red : null,
+                      ),
+                      label: ValueListenableBuilder<int>(
+                        valueListenable: _recSeconds,
+                        builder: (_, sec, __) => Text(
+                          _recording
+                              ? '${(sec ~/ 60).toString().padLeft(2, '0')}:'
+                                  '${(sec % 60).toString().padLeft(2, '0')}'
+                              : '녹음',
+                          style: const TextStyle(fontSize: 18),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),

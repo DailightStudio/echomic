@@ -50,4 +50,9 @@ class Analytics {
   static void startFailed(String cause) => _log('start_failed', {'cause': cause});
 
   static void presetSelect(String name) => _log('preset_select', {'name': name});
+  static void recordStart() => _log('record_start', {});
+  static void recordStop(String reason, int durationMs) => _log(
+      'record_stop', {'reason': reason, 'duration_s': durationMs ~/ 1000});
+  static void autotuneHold(int holdMs) =>
+      _log('autotune_hold', {'hold_ms': holdMs});
 }

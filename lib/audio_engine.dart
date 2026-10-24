@@ -20,7 +20,9 @@ class AudioEngine {
   /// changes (`{'type': 'state', 'running': false, 'reason': 'unplug' |
   /// 'interruption'}`, reason absent when unknown) when the engine stops
   /// unexpectedly, and route changes (`{'type': 'route', ...}` with the same
-  /// payload as [routeInfo]) when an output device comes or goes.
+  /// payload as [routeInfo]) when an output device comes or goes, and
+  /// recording changes (`{'type': 'record', 'recording': bool, 'path': ..}`;
+  /// on stop also `'durationMs'` and `'reason': 'user' | 'cap' | 'engine'`).
   Stream<Map<String, dynamic>> get audioEvents =>
       _events.receiveBroadcastStream().map(
             (e) => Map<String, dynamic>.from(e as Map),
@@ -100,6 +102,26 @@ class AudioEngine {
   /// speaker): true = on automatically when the speaker is the output, false = never.
   Future<void> setSpeakerAec(bool enabled) async {
     await _channel.invokeMethod<void>('setSpeakerAec', {'enabled': enabled});
+  }
+
+  /// Folder (app-private) where the native engine writes recordings.
+  Future<String> recordingsDir() async {
+    return (await _channel.invokeMethod<String>('recordingsDir'))!;
+  }
+
+  /// Starts recording the processed voice while the engine runs. Returns
+  /// false when there is not enough free space or the engine is not running.
+  Future<bool> startRecording() async {
+    try {
+      return await _channel.invokeMethod<bool>('startRecording') ?? false;
+    } on PlatformException catch (e) {
+      if (e.code == 'disk_full') return false;
+      rethrow;
+    }
+  }
+
+  Future<void> stopRecording() async {
+    await _channel.invokeMethod<void>('stopRecording');
   }
 }
 
