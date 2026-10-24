@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import 'analytics.dart';
 import 'home_screen.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Analytics.init();
   runApp(const EchomicApp());
 }
 

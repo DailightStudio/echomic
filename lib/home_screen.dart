@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'ads.dart';
+import 'analytics.dart';
 import 'audio_engine.dart';
 
 // Echo/reverb presets. The first one (karaoke) is also the fresh-install
@@ -131,6 +132,9 @@ class _HomeScreenState extends State<HomeScreen> {
             } else if (!running && _running) {
               _engine.stop(); // make sure nothing is left capturing
               WakelockPlus.disable();
+              final started = _sessionStart;
+              Analytics.echoStop(reason ?? 'unknown',
+                  started == null ? null : DateTime.now().difference(started));
               setState(() {
                 _running = false;
                 _sessionStart = null;
@@ -271,6 +275,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // One tap sets echo length, repeats and reverb together.
   void _applyPreset(_Preset preset) {
+    Analytics.presetSelect(preset.name);
     setState(() {
       _echoDelayMs = preset.delayMs;
       _echoFeedback = preset.feedback;
@@ -340,12 +345,16 @@ class _HomeScreenState extends State<HomeScreen> {
         });
         final started = _sessionStart;
         _sessionStart = null;
+        Analytics.echoStop(
+            'user', started == null ? null : DateTime.now().difference(started));
         if (started != null) {
           StopInterstitial.maybeShow(DateTime.now().difference(started));
         }
       } else {
         final PermissionStatus mic = await Permission.microphone.request();
         if (!mic.isGranted) {
+          Analytics.startFailed(
+              mic.isPermanentlyDenied ? 'permission_permanent' : 'permission_denied');
           setState(() {
             _status = '권한 필요';
             _hint = '마이크 권한을 허용해야 시작할 수 있습니다.';
@@ -397,6 +406,9 @@ class _HomeScreenState extends State<HomeScreen> {
           _sessionStart = DateTime.now();
           await _refreshRoute();
           _showRouteHint();
+          Analytics.echoStart(_output, _latencyMs);
+        } else {
+          Analytics.startFailed('engine');
         }
         setState(() {
           _running = ok;
@@ -406,6 +418,10 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       debugPrint('toggle failed: $e');
+      if (!_running) {
+        Analytics.startFailed(
+            e is PlatformException && e.code == 'background' ? 'background' : 'error');
+      }
       if (e is PlatformException && e.code == 'background') {
         setState(() {
           _status = '시작 못 함';

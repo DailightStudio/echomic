@@ -25,3 +25,8 @@ iOS 는 ATT 를 묻지 않고 비맞춤 광고만 요청합니다. 문의: wjs92
 - Play 아이콘 512: assets/icon/play_icon_512.png
 - 원본 1024: assets/icon/icon_1024.png
 - App Store 6.9형 스크린샷: assets/screenshots/iphone69_home.png (1320x2868, CI 시뮬레이터 캡처)
+
+## 1.0.3 부터 Firebase Analytics (프로젝트 echomic-dailight, GA 속성 560635676)
+- 이벤트: SDK 자동(first_open, session_start, user_engagement, app_remove) + echo_start, echo_stop, start_failed, preset_select (lib/analytics.dart)
+- Play 데이터 보안: 기존 답변(기기 ID, 대략적 위치, 앱 상호작용, 진단 / 용도 분석 포함)으로 덮임 — 변경 없음
+- ASC 라벨: 기기 ID 용도에 '분석' 추가 필요(1.0.3 제출 전), 사용자와 연결 안 됨, 추적 없음
