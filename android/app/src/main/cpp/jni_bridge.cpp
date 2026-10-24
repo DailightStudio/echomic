@@ -121,6 +121,18 @@ Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetFrequencyShift(
     if (gEngine) gEngine->setFrequencyShiftEnabled(enabled == JNI_TRUE);
 }
 
+JNIEXPORT void JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeSetSpeakerAec(
+    JNIEnv * /*env*/, jobject /*thiz*/, jboolean on) {
+    if (gEngine) gEngine->setSpeakerAecDesired(on == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_dailightstudio_echomic_AudioEnginePlugin_nativeIsSpeakerAecActive(
+    JNIEnv * /*env*/, jobject /*thiz*/) {
+    return (gEngine && gEngine->isSpeakerAecActive()) ? JNI_TRUE : JNI_FALSE;
+}
+
 // Same gEngine->isRunning() query as AudioEnginePlugin's nativeIsRunning,
 // bound to MainActivity too so Back (popSystemNavigator()) can check it
 // synchronously without going through the Flutter plugin/method channel.

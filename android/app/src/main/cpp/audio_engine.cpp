@@ -67,6 +67,8 @@ void AudioEngine::stop() {
 }
 
 bool AudioEngine::openStreams() {
+    const bool aec = speakerAecDesired_.load();
+
     // ---- Output stream first so we can match its format for the input. ----
     oboe::AudioStreamBuilder outBuilder;
     outBuilder.setDirection(oboe::Direction::Output)
@@ -84,6 +86,8 @@ bool AudioEngine::openStreams() {
         // stream instead of the media volume keys, and (c) can duck/pause
         // other apps' playback the way an incoming call would. Game+Music
         // avoids all three while keeping the low-latency fast-mixer path.
+        // Output stays on this media path even in speaker mode; only the
+        // input preset changes.
         ->setUsage(oboe::Usage::Game)
         ->setContentType(oboe::ContentType::Music);
 
@@ -108,7 +112,10 @@ bool AudioEngine::openStreams() {
         ->setFormat(oboe::AudioFormat::Float)
         ->setSampleRate(sampleRate_)
         ->setChannelCount(channelCount_)
-        ->setInputPreset(oboe::InputPreset::VoicePerformance)
+        // VoiceCommunication is the source the audio policy attaches the
+        // platform AEC to (speaker mode only).
+        ->setInputPreset(aec ? oboe::InputPreset::VoiceCommunication
+                             : oboe::InputPreset::VoicePerformance)
         // BT routes (e.g. HFP mics) may only offer 8/16 kHz PCM16 mono; let
         // Oboe resample/convert to the output format instead of failing start().
         ->setChannelConversionAllowed(true)
@@ -178,8 +185,9 @@ bool AudioEngine::openStreams() {
         return false;
     }
 
-    LOGI("Streams started: rate=%d ch=%d burst=%d", sampleRate_, channelCount_,
-         outputStream_->getFramesPerBurst());
+    speakerAecActive_.store(aec);
+    LOGI("Streams started: rate=%d ch=%d burst=%d aec=%d", sampleRate_, channelCount_,
+         outputStream_->getFramesPerBurst(), aec ? 1 : 0);
     return true;
 }
 
@@ -215,6 +223,7 @@ void AudioEngine::closeStreams() {
         inputStream_.reset();
     }
     duplex_.setInputStream(nullptr);
+    speakerAecActive_.store(false);
 }
 
 void AudioEngine::runDsp(float *buf, int numFrames) {
@@ -236,14 +245,18 @@ void AudioEngine::runDsp(float *buf, int numFrames) {
         // so no envelope-follower gain reduction is applied either.
         comp_.process(buf, numFrames, channels, /*applyMakeup=*/true);
     }
-    echo_.process(buf, numFrames, boost ? gain_.load() : 1.0f);
+    const bool aec = speakerAecActive_.load();
+    float g = boost ? gain_.load() : 1.0f;
+    if (aec) g = std::min(g, kSpeakerMaxGain);
+    echo_.process(buf, numFrames, g);
     suppressor_.process(buf, numFrames, channels);
     freqShifter_.process(buf, numFrames, channels);
     eq_.process(buf, numFrames, channels);
     reverb_.process(buf, numFrames, channels);
 
     // 마스터볼륨
-    const float master = masterGain_.load();
+    float master = masterGain_.load();
+    if (aec) master *= kSpeakerMasterCap;
     if (master < 0.9999f) {
         for (int i = 0; i < sampleCount; ++i) buf[i] *= master;
     }
@@ -371,6 +384,38 @@ void AudioEngine::handleInputReadFailure() {
         closeStreams();
         if (!openStreams()) {
             LOGE("Restart after input read failure failed");
+            closeStreams();
+            running_.store(false);
+        } else {
+            generation_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }).detach();
+}
+
+void AudioEngine::setSpeakerAecDesired(bool on) {
+    speakerAecDesired_.store(on);
+    if (running_.load() && on != speakerAecActive_.load()) scheduleModeSwitch();
+}
+
+void AudioEngine::scheduleModeSwitch() {
+    // A burst of route events only spawns one switch thread; it reads the
+    // latest desired mode after the debounce.
+    if (modeSwitchPending_.exchange(true)) return;
+
+    std::thread([this]() {
+        std::this_thread::sleep_for(kRestartDebounce);
+        std::lock_guard<std::mutex> lock(lifecycleLock_);
+        modeSwitchPending_.store(false);
+        if (!running_.load()) return;
+        // A disconnect/input-failure restart may already have reopened the
+        // streams with the desired mode.
+        if (speakerAecDesired_.load() == speakerAecActive_.load()) return;
+
+        LOGI("Switching speaker AEC mode -> %d", speakerAecDesired_.load() ? 1 : 0);
+        generation_.fetch_add(1, std::memory_order_relaxed);
+        closeStreams();
+        if (!openStreams()) {
+            LOGE("Reopen after speaker mode switch failed");
             closeStreams();
             running_.store(false);
         } else {

@@ -88,6 +88,11 @@ final class AudioEnginePlugin: NSObject {
                 engine.setFrequencyShiftEnabled(enabled)
             }
             result(nil)
+        case "setSpeakerAec":
+            if let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool {
+                engine.setSpeakerAec(enabled)
+            }
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }

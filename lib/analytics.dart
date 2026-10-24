@@ -33,8 +33,10 @@ class Analytics {
     });
   }
 
-  static void echoStart(AudioOutput output, double? latencyMs) => _log('echo_start', {
+  static void echoStart(AudioOutput output, double? latencyMs, bool speakerAec) =>
+      _log('echo_start', {
         'output': output.name,
+        'mode': speakerAec ? 'speaker_aec' : 'raw',
         if (latencyMs != null) 'latency_ms': latencyMs.round(),
       });
 

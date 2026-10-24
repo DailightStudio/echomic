@@ -55,6 +55,10 @@ public:
     void setGateThreshold(float db)         { gate_.setThresholdDb(db); }
     void setEQBand(int band, float gainDb)   { eq_.setBandGain(band, gainDb); }
     void setFrequencyShiftEnabled(bool en)   { freqShifter_.enabled.store(en); }
+    // Speaker mode: VoiceCommunication input preset (platform AEC) plus
+    // gain caps. Live-switches the streams if the engine is running.
+    void setSpeakerAecDesired(bool on);
+    bool isSpeakerAecActive() const   { return speakerAecActive_.load(); }
     float getRmsLevel() const         { return rmsLevel_.load(); }
     bool isRunning() const            { return running_.load(); }
     // Mic -> callback -> speaker round-trip estimate in ms (input + output
@@ -99,6 +103,7 @@ private:
                                                       void *outputData,
                                                       int numOutputFrames);
     void handleInputReadFailure();
+    void scheduleModeSwitch();
 
     DuplexProcessor duplex_;
 
@@ -118,6 +123,10 @@ private:
     std::atomic<float> gain_{1.0f};
     // false = no amplification: input gain pinned to 1.0 and compressor bypassed entirely.
     std::atomic<bool> boost_{true};
+    // Desired = what the next openStreams() uses; active = what the current
+    // streams were opened with (read by runDsp() for the gain caps).
+    std::atomic<bool> speakerAecDesired_{false};
+    std::atomic<bool> speakerAecActive_{false};
 
     // Scratch buffer the DSP chain processes in place before it is copied to
     // the (read-only, from our side) output buffer. Sized once in
@@ -141,8 +150,13 @@ private:
     // callbacks (before the stream actually stops) only spawns one
     // handler thread instead of one per callback.
     std::atomic<bool> inputFailurePending_{false};
+    // Same one-shot guard for scheduleModeSwitch().
+    std::atomic<bool> modeSwitchPending_{false};
 
     static constexpr float kMaxGain = 4.0f;
+    // Speaker mode: the AEC cannot cancel clipped output, so keep headroom.
+    static constexpr float kSpeakerMaxGain = 2.0f;
+    static constexpr float kSpeakerMasterCap = 0.7f;
 };
 
 #endif  // ECHOMIC_AUDIO_ENGINE_H

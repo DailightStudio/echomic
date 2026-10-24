@@ -200,6 +200,11 @@ final class AudioEngine: NSObject {
 
     private var isReconfiguring = false
 
+    // Speaker mode: platform voice processing (AEC) on the built-in
+    // speaker. Policy is pushed from Dart; active reflects the running graph.
+    var speakerAecPolicyAuto = true
+    private(set) var speakerAecActive = false
+
     private var observers: [NSObjectProtocol] = []
 
     // Cached echo params so they survive a prepare()/restart.
@@ -255,6 +260,17 @@ final class AudioEngine: NSObject {
 
     func setFrequencyShiftEnabled(_ enabled: Bool) { freqShifter.enabled = enabled }
 
+    func setSpeakerAec(_ auto: Bool) {
+        speakerAecPolicyAuto = auto
+        guard isRunning, !isReconfiguring, speakerAecActive != desiredSpeakerAec() else { return }
+        isReconfiguring = true
+        DispatchQueue.main.async {
+            self.internalStop(keepObservers: true)
+            _ = self.start()
+            self.isReconfiguring = false
+        }
+    }
+
     func setEQBand(_ band: Int, gainDb: Float) {
         guard band >= 0, band < eq.bands.count else { return }
         let clamped = min(max(gainDb, -12), 12)
@@ -271,6 +287,29 @@ final class AudioEngine: NSObject {
             try checkMicPermission()
             try configureSession()
             attachPersistentNodesIfNeeded()
+
+            // Voice processing changes the input format, so toggle it before
+            // reading the format below. The engine is stopped here, which
+            // setVoiceProcessingEnabled requires.
+            let aec = desiredSpeakerAec()
+            if engine.inputNode.isVoiceProcessingEnabled != aec {
+                try engine.inputNode.setVoiceProcessingEnabled(aec)
+            }
+            if aec {
+                // Our compressor does the gain; keep Apple's AGC out of it.
+                engine.inputNode.isVoiceProcessingAGCEnabled = false
+                if #available(iOS 17.0, *) {
+                    // Duck the other app's MR track as little as possible.
+                    // Advanced ducking would duck it whenever the local user
+                    // sings -- the opposite of what we want. On iOS 16 VPIO
+                    // applies its default ducking and there is no API to
+                    // lower it.
+                    engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                        AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                            enableAdvancedDucking: false, duckingLevel: .min)
+                }
+            }
+            speakerAecActive = aec
 
             // .playAndRecord enables both the real inputNode and A2DP/speaker
             // output, so the processing format is derived straight from the
@@ -409,6 +448,7 @@ final class AudioEngine: NSObject {
             if output != "other" { break }
         }
         var info: [String: Any] = ["output": output]
+        info["mode"] = speakerAecActive ? "speaker_aec" : "raw"
         if isRunning {
             // Mic -> our render callback -> speaker: hardware in + out plus
             // the two IO buffers the engine needs to turn a block around.
@@ -467,6 +507,7 @@ final class AudioEngine: NSObject {
         try? AVAudioSession.sharedInstance().setActive(
             false, options: [.notifyOthersOnDeactivation])
         isRunning = false
+        speakerAecActive = false
         processingFormat = nil
     }
 
@@ -481,7 +522,18 @@ final class AudioEngine: NSObject {
         dspScratch = nil
         dspScratchCapacityFrames = 0
         isRunning = false
+        speakerAecActive = false
         processingFormat = nil
+    }
+
+    private func routeIsBuiltInSpeaker() -> Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains {
+            $0.portType == .builtInSpeaker || $0.portType == .builtInReceiver
+        }
+    }
+
+    private func desiredSpeakerAec() -> Bool {
+        speakerAecPolicyAuto && routeIsBuiltInSpeaker()
     }
 
     private func checkMicPermission() throws {
@@ -573,7 +625,21 @@ final class AudioEngine: NSObject {
                 // Auto-resume is intentionally NOT implemented here (see
                 // the interruption observer above) -- stays stopped until
                 // the user taps Start again.
+                // With the speaker-mode policy on, switch live to voice
+                // processing (AEC) instead of stopping.
                 guard self.isRunning else { return }
+                if self.speakerAecPolicyAuto {
+                    guard !self.isReconfiguring else { return }
+                    self.isReconfiguring = true
+                    DispatchQueue.main.async {
+                        self.internalStop(keepObservers: true)
+                        // start() clears lastStopReason and its failure path
+                        // stop()s; report the unplug, not a user stop.
+                        if !self.start() { self.lastStopReason = "unplug" }
+                        self.isReconfiguring = false
+                    }
+                    return
+                }
                 self.lastStopReason = "unplug"
                 DispatchQueue.main.async {
                     self.internalStop(keepObservers: false)
@@ -587,9 +653,13 @@ final class AudioEngine: NSObject {
                 // poll never observes an intermediate `false`).
                 guard self.isRunning, !self.isReconfiguring else { return }
                 let newFormat = self.engine.inputNode.outputFormat(forBus: 0)
+                // Also reconfigure when the speaker-mode decision flips
+                // (e.g. headphones plugged in -> back to raw), even if the
+                // format is unchanged.
                 guard let fmt = self.processingFormat, newFormat.sampleRate > 0,
                       abs(fmt.sampleRate - newFormat.sampleRate) > 1.0
-                        || fmt.channelCount != newFormat.channelCount else { return }
+                        || fmt.channelCount != newFormat.channelCount
+                        || self.speakerAecActive != self.desiredSpeakerAec() else { return }
                 self.isReconfiguring = true
                 DispatchQueue.main.async {
                     self.internalStop(keepObservers: true)
@@ -673,13 +743,16 @@ final class AudioEngine: NSObject {
         if boostEnabled {
             comp.process(scratch, frameCount: count, channels: channels, applyMakeup: true)
         }
-        echo.process(scratch, frameCount: count, gain: boostEnabled ? gain : 1)
+        // Speaker mode caps the input gain at 2x: the AEC cannot cancel
+        // clipped output.
+        echo.process(scratch, frameCount: count,
+                     gain: min(boostEnabled ? gain : 1, speakerAecActive ? 2.0 : 4.0))
         suppressor.process(scratch, frameCount: count, channels: channels)
         freqShifter.process(scratch, frameCount: count, channels: channels)
 
         // Master volume + RMS level (non-atomic, but adequate for UI polling).
         let total = count * channels
-        let vol = masterVolume
+        let vol = masterVolume * (speakerAecActive ? 0.7 : 1.0)
         var sumSq: Float = 0
         for i in 0..<total {
             scratch[i] *= vol

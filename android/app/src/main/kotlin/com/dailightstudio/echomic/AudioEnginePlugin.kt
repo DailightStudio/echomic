@@ -32,9 +32,9 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
 
     // Fires just before the active output route disappears (e.g. wired
     // headset unplugged) and audio would otherwise fall back to the
-    // built-in speaker -- stop immediately instead of letting the native
-    // ErrorDisconnected auto-reconnect land on the speaker and howl into
-    // the still-open mic.
+    // built-in speaker -- switch to speaker (AEC) mode, or with the policy
+    // off stop immediately instead of letting the native ErrorDisconnected
+    // auto-reconnect land on the speaker and howl into the still-open mic.
     private var noisyReceiver: BroadcastReceiver? = null
 
     // Pushes a 'route' event whenever an output device comes or goes so the
@@ -44,6 +44,11 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     // Why the engine last stopped on its own ("unplug"); null after a user
     // stop. Attached to the running:false event so the UI can say what happened.
     private var stopReason: String? = null
+
+    // Dart-owned policy ("스피커 모드 자동"): when true, the native engine runs
+    // the VoiceCommunication (platform AEC) input whenever the output is the
+    // built-in speaker. Native owns the actual mode switch.
+    private var speakerAecPolicyAuto = true
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         appContext = binding.applicationContext
@@ -86,6 +91,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                     return
                 }
                 stopReason = null
+                applyDesiredMode()
                 val ok = nativeStart()
                 if (ok) {
                     try {
@@ -154,6 +160,11 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                 nativeSetFrequencyShift(enabled)
                 result.success(null)
             }
+            "setSpeakerAec" -> {
+                speakerAecPolicyAuto = call.argument<Boolean>("enabled") ?: true
+                applyDesiredMode()
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
     }
@@ -212,12 +223,19 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
         return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
     }
 
-    // --- Stop before the route falls back to the speaker (fix: unplug-> howl) ---
+    // --- Route falls back to the speaker: switch to speaker (AEC) mode, or
+    // stop when the policy is off (fix: unplug-> howl) ---
     private fun registerNoisyReceiver() {
         if (noisyReceiver != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                endSession(reason = "unplug")
+                // The departing device is still listed at this point, and the
+                // fallback may be Bluetooth, not the speaker: re-decide from
+                // the device list once it is gone.
+                if (speakerAecPolicyAuto) {
+                    android.os.Handler(android.os.Looper.getMainLooper())
+                        .postDelayed({ if (expectedRunning) applyDesiredMode() }, 300)
+                } else endSession(reason = "unplug")
             }
         }
         ContextCompat.registerReceiver(
@@ -236,9 +254,8 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     }
 
     // --- Output route (speaker / wired / bluetooth) + latency for the UI ---
-    private fun routeInfo(): Map<String, Any> {
+    private fun outputKind(): String {
         val am = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        var output = "speaker"
         // Wired wins over BT (that is how the platform routes when both are
         // attached); anything attached beats the built-in speaker.
         var hasWired = false
@@ -252,8 +269,14 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
                     (d.type == AudioDeviceInfo.TYPE_BLE_HEADSET || d.type == AudioDeviceInfo.TYPE_BLE_SPEAKER)) hasBt = true
             }
         }
-        if (hasWired) output = "wired" else if (hasBt) output = "bluetooth"
-        val info = mutableMapOf<String, Any>("output" to output)
+        return if (hasWired) "wired" else if (hasBt) "bluetooth" else "speaker"
+    }
+
+    private fun applyDesiredMode() = nativeSetSpeakerAec(speakerAecPolicyAuto && outputKind() == "speaker")
+
+    private fun routeInfo(): Map<String, Any> {
+        val info = mutableMapOf<String, Any>("output" to outputKind())
+        info["mode"] = if (nativeIsSpeakerAecActive()) "speaker_aec" else "raw"
         val latency = nativeGetLatencyMs()
         if (latency >= 0) info["latencyMs"] = latency
         return info
@@ -266,6 +289,7 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
             override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) = pushRoute()
             override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>?) = pushRoute()
             private fun pushRoute() {
+                applyDesiredMode()
                 val sink = eventSink ?: return
                 val event = mutableMapOf<String, Any>("type" to "route")
                 event.putAll(routeInfo())
@@ -305,6 +329,8 @@ class AudioEnginePlugin : FlutterPlugin, MethodCallHandler {
     private external fun nativeSetEQBand(band: Int, gainDb: Float)
     private external fun nativeSetBoost(enabled: Boolean)
     private external fun nativeSetFrequencyShift(enabled: Boolean)
+    private external fun nativeSetSpeakerAec(on: Boolean)
+    private external fun nativeIsSpeakerAecActive(): Boolean
 
     companion object {
         private const val CHANNEL = "com.dailightstudio.echomic/audio"

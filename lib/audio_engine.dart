@@ -95,19 +95,28 @@ class AudioEngine {
   Future<void> setFrequencyShift(bool enabled) async {
     await _channel.invokeMethod<void>('setFrequencyShift', {'enabled': enabled});
   }
+
+  /// Policy for speaker mode (platform echo cancellation on the built-in
+  /// speaker): true = on automatically when the speaker is the output, false = never.
+  Future<void> setSpeakerAec(bool enabled) async {
+    await _channel.invokeMethod<void>('setSpeakerAec', {'enabled': enabled});
+  }
 }
 
 enum AudioOutput { speaker, wired, bluetooth, other }
 
 /// Where the sound is going and how late it gets there.
 class RouteInfo {
-  const RouteInfo({required this.output, this.latencyMs});
+  const RouteInfo({required this.output, this.latencyMs, this.speakerAec = false});
 
   final AudioOutput output;
 
   /// Mic -> speaker round trip in ms; null while the engine is not running
   /// or when the platform cannot say.
   final double? latencyMs;
+
+  /// True while the engine runs in speaker mode (platform AEC input).
+  final bool speakerAec;
 
   static RouteInfo fromMap(Map raw) {
     final output = switch (raw['output']) {
@@ -116,6 +125,10 @@ class RouteInfo {
       'bluetooth' => AudioOutput.bluetooth,
       _ => AudioOutput.other,
     };
-    return RouteInfo(output: output, latencyMs: (raw['latencyMs'] as num?)?.toDouble());
+    return RouteInfo(
+      output: output,
+      latencyMs: (raw['latencyMs'] as num?)?.toDouble(),
+      speakerAec: raw['mode'] == 'speaker_aec',
+    );
   }
 }

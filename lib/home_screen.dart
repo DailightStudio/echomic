@@ -43,6 +43,11 @@ const bool _kDefaultFreqShift = true;
 // so the new default needs a new key to reach existing installs.
 const String _kFreqShiftKey = 'freqShift2';
 
+// Speaker mode: platform echo cancellation while the built-in speaker plays.
+const String _kSpeakerAecKey = 'speakerAec';
+const bool _kDefaultSpeakerAec = true;
+const String _kSpeakerHint = '스피커로 쓰면 스피커 모드가 자동으로 켜져 하울링을 줄입니다. 이어폰을 쓰면 더 또렷합니다.';
+
 const String _kGuideShownKey = 'guideShown';
 
 // EQ bands, low to high: 100 Hz, 400 Hz, 1 kHz, 3 kHz, 8 kHz (native order).
@@ -95,6 +100,8 @@ class _HomeScreenState extends State<HomeScreen> {
   double _gateThresholdDb = _kDefaultGateDb;
   final List<double> _eqGains = [0.0, 0.0, 0.0, 0.0, 0.0]; // dB per band
   bool _freqShiftEnabled = _kDefaultFreqShift;
+  bool _speakerAecAuto = _kDefaultSpeakerAec; // user policy
+  bool _speakerAec = false; // what the engine is actually running
   // Level updates arrive every 50 ms; only the meter listens so the rest of
   // the screen (header image filter, ten sliders) is not rebuilt each time.
   final ValueNotifier<double> _rmsLevel = ValueNotifier(0.0); // 0.0~1.0 선형
@@ -120,6 +127,7 @@ class _HomeScreenState extends State<HomeScreen> {
             if ((rms - _rmsLevel.value).abs() > 0.005) _rmsLevel.value = rms;
           } else if (type == 'route') {
             _applyRoute(RouteInfo.fromMap(event));
+            _refreshRouteAfterSwitch();
           } else if (type == 'state') {
             final running = event['running'] as bool? ?? false;
             final reason = event['reason'] as String?;
@@ -184,7 +192,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _runningStatus() {
     final ms = _latencyMs;
-    return ms == null ? '실행 중' : '실행 중 · 지연 약 ${ms.round()}ms';
+    final mode = _speakerAec ? '스피커 모드 · ' : '';
+    return ms == null ? '$mode실행 중' : '$mode실행 중 · 지연 약 ${ms.round()}ms';
   }
 
   void _applyRoute(RouteInfo info) {
@@ -192,6 +201,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _output = info.output;
       _latencyMs = info.latencyMs;
+      _speakerAec = info.speakerAec;
       if (_running) _status = _runningStatus();
     });
   }
@@ -204,10 +214,21 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // Native switches speaker mode 300 ms after a route/policy change and sends
+  // no event when it is done, so ask again once the reopen has settled.
+  void _refreshRouteAfterSwitch() {
+    if (!_running) return;
+    Future.delayed(const Duration(milliseconds: 700), () {
+      if (mounted && _running) _refreshRoute();
+    });
+  }
+
   // Speaker: howl risk. Bluetooth: the ear hears itself late. Wired: nothing to say.
   void _showRouteHint() {
     final text = switch (_output) {
-      AudioOutput.speaker => '스피커로 쓰면 하울링이 생길 수 있습니다. 이어폰을 권장합니다.',
+      AudioOutput.speaker => _speakerAec
+          ? '스피커 모드: 하울링을 자동으로 줄입니다. 이어폰을 쓰면 더 또렷합니다.'
+          : '스피커로 쓰면 하울링이 생길 수 있습니다. 이어폰을 권장합니다.',
       AudioOutput.bluetooth => '블루투스 이어폰은 목소리가 늦게 들릴 수 있습니다. 유선 이어폰을 권장합니다.',
       _ => null,
     };
@@ -231,7 +252,8 @@ class _HomeScreenState extends State<HomeScreen> {
           '2. 시작을 누르고 마이크 권한을 허용하세요.\n'
           '3. 유튜브나 멜론으로 MR을 틀고 노래하세요.\n\n'
           '다른 앱으로 넘어가도 목소리는 계속 나옵니다. '
-          '스피커로 쓰면 하울링이 날 수 있습니다.',
+          '스피커로 쓰면 스피커 모드가 자동으로 켜져 하울링을 줄입니다. '
+          '이어폰을 쓰면 더 또렷합니다.',
         ),
         actions: [
           TextButton(
@@ -259,6 +281,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _eqGains[i] = p.getDouble('eq$i') ?? 0.0;
       }
       _freqShiftEnabled = p.getBool(_kFreqShiftKey) ?? _kDefaultFreqShift;
+      _speakerAecAuto = p.getBool(_kSpeakerAecKey) ?? _kDefaultSpeakerAec;
     });
     _showFirstRunGuide(p);
   }
@@ -277,6 +300,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await p.setDouble('eq$i', _eqGains[i]);
     }
     await p.setBool(_kFreqShiftKey, _freqShiftEnabled);
+    await p.setBool(_kSpeakerAecKey, _speakerAecAuto);
   }
 
   // One tap sets echo length, repeats and reverb together.
@@ -306,6 +330,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _eqGains[i] = 0.0;
       }
       _freqShiftEnabled = _kDefaultFreqShift;
+      _speakerAecAuto = _kDefaultSpeakerAec;
     });
     _engine.setBoost(_boostEnabled);
     _engine.setGain(_gain);
@@ -314,6 +339,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _engine.setEQBand(i, _eqGains[i]);
     }
     _engine.setFrequencyShift(_freqShiftEnabled);
+    _engine.setSpeakerAec(_speakerAecAuto);
     _savePrefs();
   }
 
@@ -347,6 +373,7 @@ class _HomeScreenState extends State<HomeScreen> {
         WakelockPlus.disable();
         setState(() {
           _running = false;
+          _speakerAec = false;
           _latencyMs = null;
           _status = '정지됨';
           _hint = null;
@@ -390,7 +417,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _savePrefs();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('스피커로 쓰면 하울링이 생길 수 있습니다. 이어폰을 권장합니다.'),
+              content: Text(_kSpeakerHint),
               duration: Duration(seconds: 3),
             ),
           );
@@ -407,6 +434,7 @@ class _HomeScreenState extends State<HomeScreen> {
           await _engine.setEQBand(i, _eqGains[i]);
         }
         await _engine.setFrequencyShift(_freqShiftEnabled);
+        await _engine.setSpeakerAec(_speakerAecAuto);
 
         final bool ok = await _engine.start();
         engineStarted = ok;
@@ -414,7 +442,7 @@ class _HomeScreenState extends State<HomeScreen> {
           WakelockPlus.enable();
           _sessionStart = DateTime.now();
           await _refreshRoute();
-          Analytics.echoStart(_output, _latencyMs);
+          Analytics.echoStart(_output, _latencyMs, _speakerAec);
           _showRouteHint();
         } else {
           Analytics.startFailed('engine');
@@ -619,6 +647,21 @@ class _HomeScreenState extends State<HomeScreen> {
                       setState(() => _freqShiftEnabled = v);
                       _engine.setFrequencyShift(v);
                       _savePrefs();
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                  ),
+                  SwitchListTile(
+                    title: const Text('스피커 모드 자동'),
+                    subtitle: Text(_speakerAecAuto
+                        ? '스피커로 쓰면 에코 제거를 자동으로 켭니다'
+                        : '항상 끕니다 (하울링 주의)'),
+                    value: _speakerAecAuto,
+                    onChanged: (v) {
+                      setState(() => _speakerAecAuto = v);
+                      _engine.setSpeakerAec(v);
+                      _savePrefs();
+                      _refreshRouteAfterSwitch();
                     },
                     contentPadding: EdgeInsets.zero,
                     dense: true,
