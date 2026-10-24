@@ -20,6 +20,7 @@
 		A10000BB1ED2DC5600515810 /* HighPassFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000BA1ED2DC5600515810 /* HighPassFilter.swift */; };
 		A10000CB1ED2DC5600515810 /* NoiseGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000CA1ED2DC5600515810 /* NoiseGate.swift */; };
 		A10000DB1ED2DC5600515810 /* FrequencyShifter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000DA1ED2DC5600515810 /* FrequencyShifter.swift */; };
+		A10000FA1ED2DC5600515810 /* DspBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = A10000EB1ED2DC5600515810 /* DspBridge.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -56,6 +57,8 @@
 		A10000BA1ED2DC5600515810 /* HighPassFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HighPassFilter.swift; sourceTree = "<group>"; };
 		A10000CA1ED2DC5600515810 /* NoiseGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoiseGate.swift; sourceTree = "<group>"; };
 		A10000DA1ED2DC5600515810 /* FrequencyShifter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrequencyShifter.swift; sourceTree = "<group>"; };
+		A10000EA1ED2DC5600515810 /* DspBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DspBridge.h; sourceTree = "<group>"; };
+		A10000EB1ED2DC5600515810 /* DspBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DspBridge.mm; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -115,6 +118,8 @@
 				A10000BA1ED2DC5600515810 /* HighPassFilter.swift */,
 				A10000CA1ED2DC5600515810 /* NoiseGate.swift */,
 				A10000DA1ED2DC5600515810 /* FrequencyShifter.swift */,
+				A10000EA1ED2DC5600515810 /* DspBridge.h */,
+				A10000EB1ED2DC5600515810 /* DspBridge.mm */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -237,6 +242,7 @@
 				A10000BB1ED2DC5600515810 /* HighPassFilter.swift in Sources */,
 				A10000CB1ED2DC5600515810 /* NoiseGate.swift in Sources */,
 				A10000DB1ED2DC5600515810 /* FrequencyShifter.swift in Sources */,
+				A10000FA1ED2DC5600515810 /* DspBridge.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -249,7 +255,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_CXX_LIBRARY = "libc++";
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
@@ -304,7 +310,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++17";
 				CLANG_CXX_LIBRARY = "libc++";
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;

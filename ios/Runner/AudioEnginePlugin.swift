@@ -95,6 +95,10 @@ final class AudioEnginePlugin: NSObject {
                 engine.setSpeakerAec(enabled)
             }
             result(nil)
+        case "setAutotuneHold":
+            let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
+            engine.setAutotuneHold(on)
+            result(nil)
         case "recordingsDir":
             if let dir = recordingsDir() {
                 result(dir.path)

@@ -170,6 +170,8 @@ final class AudioEngine: NSObject {
     private let comp = Compressor()
     private let suppressor = FeedbackSuppressor()
     private let freqShifter = FrequencyShifter()
+    // Shared C++ auto-tune (android/app/src/main/cpp/pitch_corrector.h) via DspBridge.mm.
+    private let tuner: OpaquePointer = pc_create()
     private let hpf  = HighPassFilter()
     private let gate = NoiseGate()
 
@@ -275,6 +277,11 @@ final class AudioEngine: NSObject {
 
     func setFrequencyShiftEnabled(_ enabled: Bool) { freqShifter.enabled = enabled }
 
+    /// Momentary auto-tune: atomic flag, the C++ side crossfades over 20 ms.
+    func setAutotuneHold(_ on: Bool) { pc_set_hold(tuner, on) }
+
+    deinit { pc_destroy(tuner) }
+
     func setSpeakerAec(_ auto: Bool) {
         speakerAecPolicyAuto = auto
         guard isRunning, !isReconfiguring, speakerAecActive != desiredSpeakerAec() else { return }
@@ -363,6 +370,8 @@ final class AudioEngine: NSObject {
             suppressor.prepare(sampleRate: Float(format.sampleRate),
                                channelCount: channels)
             freqShifter.prepare(sampleRate: Float(format.sampleRate))
+            pc_prepare(tuner, Float(format.sampleRate), Int32(channels))
+            pc_reset(tuner)
 
             hpf.prepare(sampleRate: Float(format.sampleRate))
             gate.prepare(sampleRate: Float(format.sampleRate))
@@ -859,6 +868,8 @@ final class AudioEngine: NSObject {
         if boostEnabled {
             comp.process(scratch, frameCount: count, channels: channels, applyMakeup: true)
         }
+        // Auto-tune after comp, before echo, so echo/reverb tails repeat the corrected note.
+        pc_process(tuner, scratch, Int32(count), Int32(channels))
         // Speaker mode caps the input gain at 2x: the AEC cannot cancel
         // clipped output.
         echo.process(scratch, frameCount: count,
