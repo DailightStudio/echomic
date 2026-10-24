@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// AdMob setup: consent (UMP) first, then SDK init. A banner while singing and
 /// one interstitial after Stop ([StopInterstitial]) — nothing full-screen ever
@@ -162,12 +163,16 @@ class _AdBannerState extends State<AdBanner> {
 
 /// Full-screen ad at a natural break: right after the user stops singing.
 /// Never mid-session. Only after a real session and at most once per [_minGap],
-/// so a quick start/stop to tweak settings does not trigger it.
+/// so a quick start/stop to tweak settings does not trigger it. The first
+/// [_graceSessions] real sessions never show one: a full-screen ad on the
+/// first Stop of a fresh install reads as the reason to uninstall.
 class StopInterstitial {
   StopInterstitial._();
 
   static const _minSession = Duration(seconds: 60);
   static const _minGap = Duration(minutes: 3);
+  static const _graceSessions = 3;
+  static const _sessionsKey = 'adSessions';
 
   static InterstitialAd? _ad;
   static bool _loading = false;
@@ -195,11 +200,18 @@ class StopInterstitial {
   }
 
   /// Call after the audio engine has stopped.
-  static void maybeShow(Duration session) {
+  static Future<void> maybeShow(Duration session) async {
+    if (session < _minSession) {
+      if (_ad == null) preload();
+      return;
+    }
+    final p = await SharedPreferences.getInstance();
+    final sessions = (p.getInt(_sessionsKey) ?? 0) + 1;
+    await p.setInt(_sessionsKey, sessions);
     final ad = _ad;
     final last = _lastShown;
     if (ad == null ||
-        session < _minSession ||
+        sessions <= _graceSessions ||
         (last != null && DateTime.now().difference(last) < _minGap)) {
       if (ad == null) preload();
       return;

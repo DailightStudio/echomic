@@ -35,7 +35,13 @@ final _Preset _kDefaultPreset = _kPresets.first;
 const bool _kDefaultBoost = false;
 const double _kDefaultGain = 2.0;
 const double _kDefaultGateDb = -40.0;
-const bool _kDefaultFreqShift = false;
+// On by default: most phones have no headphone jack, so the first Start is
+// on the speaker, and the shifter is what keeps that from howling
+// (tools/dsp_sim: stable to +6 dB loop gain vs howl at 0 dB without it).
+const bool _kDefaultFreqShift = true;
+// 1.0.2 and earlier saved the old off default under 'freqShift' for everyone,
+// so the new default needs a new key to reach existing installs.
+const String _kFreqShiftKey = 'freqShift2';
 
 const String _kGuideShownKey = 'guideShown';
 
@@ -252,7 +258,7 @@ class _HomeScreenState extends State<HomeScreen> {
       for (int i = 0; i < 5; i++) {
         _eqGains[i] = p.getDouble('eq$i') ?? 0.0;
       }
-      _freqShiftEnabled = p.getBool('freqShift') ?? _kDefaultFreqShift;
+      _freqShiftEnabled = p.getBool(_kFreqShiftKey) ?? _kDefaultFreqShift;
     });
     _showFirstRunGuide(p);
   }
@@ -270,7 +276,7 @@ class _HomeScreenState extends State<HomeScreen> {
     for (int i = 0; i < 5; i++) {
       await p.setDouble('eq$i', _eqGains[i]);
     }
-    await p.setBool('freqShift', _freqShiftEnabled);
+    await p.setBool(_kFreqShiftKey, _freqShiftEnabled);
   }
 
   // One tap sets echo length, repeats and reverb together.

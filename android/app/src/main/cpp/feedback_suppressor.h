@@ -16,7 +16,8 @@
 // separates feedback from voiced speech/music:
 //   - IPMP: persists for kMinHitCount consecutive analysis cycles,
 //   - growth: latest magnitude at/above the candidate's running average,
-//   - PHPR: no comparable energy at the 2nd/3rd harmonic (voice has both).
+//   - Harmonic series: a neighbouring harmonic (f0 = bin/k) with comparable
+//     energy means a sung note, not a howl (isHarmonicOfVoice).
 // Notches are refreshed while the peak persists and retired after a
 // time-based hold (kHoldSeconds). The active notch bank is applied to every
 // channel via Direct Form I.
@@ -34,8 +35,11 @@ public:
     static constexpr int   kMaxCandidates    = 24;
     static constexpr int   kMinHitCount      = 6;     // IPMP: ~32 ms persistence
     static constexpr float kGrowthMinRatio   = 1.0f;  // latest >= running average
-    static constexpr float kHarmonic2Ratio   = 0.6f;  // PHPR thresholds (power)
-    static constexpr float kHarmonic3Ratio   = 0.4f;
+    // Harmonic-series test (power ratio, ~-10 dB): a sung note is a ladder of
+    // peaks spaced f0 apart, a howl is a lone sinusoid.
+    static constexpr float kNeighborRatio    = 0.1f;
+    static constexpr int   kMaxHarmonicOrder = 8;
+    static constexpr float kMinF0Bins        = 2.0f;  // ~94 Hz @ 48 kHz
 
     // Constant absolute notch bandwidth (Hz) -> Q varies with frequency, so
     // low howls get a proportionally wide notch and high howls stay surgical.
@@ -297,21 +301,38 @@ private:
         float avg = c.magnitudeSum / c.hitCount;
         if (c.lastMagnitude < avg * kGrowthMinRatio) return false;
 
-        // PHPR: voiced speech carries strong 2nd/3rd harmonics; a howl is a
-        // near-pure sinusoid. Comparable energy at 2f or 3f -> treat as voice.
-        int bin2 = bin * 2;
-        int bin3 = bin * 3;
-        if (bin2 + 1 < half) {
-            float h2 = std::max(magnitudes_[bin2 - 1],
-                                std::max(magnitudes_[bin2], magnitudes_[bin2 + 1]));
-            if (h2 > c.lastMagnitude * kHarmonic2Ratio) return false;
+        return !isHarmonicOfVoice(bin, half, c.lastMagnitude);
+    }
+
+    // Voice: the peak is the k-th harmonic of some f0 = bin/k and BOTH
+    // neighbouring harmonics (k-1 and k+1; for k = 1 just 2f) carry
+    // comparable energy. One neighbour is not enough: a second room
+    // resonance next to a growing howl looks like one (2200 + 3100 Hz room
+    // kept howling in tools/dsp_sim with the one-sided test). Upper
+    // harmonics roll off (~1/k^2 in power), so the old 2f/3f-only test
+    // (needing h2 >= 0.6x) called nearly every sung harmonic a howl and
+    // notched the voice 8-15 dB (tools/dsp_sim). A real howl grows until
+    // it dominates its neighbours, so it still fails this test in time.
+    bool isHarmonicOfVoice(int bin, int half, float m) {
+        for (int k = 1; k <= kMaxHarmonicOrder; k++) {
+            const float f0 = (float)bin / (float)k;
+            if (f0 < kMinF0Bins) break;
+            // +-1 bin search only when f0 clears the Hann main lobe (+-2 bins).
+            const int r = f0 >= 4.0f ? 1 : 0;
+            const int up = (int)(bin + f0 + 0.5f);
+            const int down = (int)(bin - f0 + 0.5f);
+            const float limit = m * kNeighborRatio;
+            if (neighborPower(up, r, half) <= limit) continue;
+            if (k == 1 || neighborPower(down, r, half) > limit) return true;
         }
-        if (bin3 + 1 < half) {
-            float h3 = std::max(magnitudes_[bin3 - 1],
-                                std::max(magnitudes_[bin3], magnitudes_[bin3 + 1]));
-            if (h3 > c.lastMagnitude * kHarmonic3Ratio) return false;
-        }
-        return true;
+        return false;
+    }
+
+    float neighborPower(int center, int radius, int half) {
+        float p = 0.0f;
+        for (int b = center - radius; b <= center + radius; b++)
+            if (b >= 1 && b < half) p = std::max(p, magnitudes_[b]);
+        return p;
     }
 
     // Find the candidate tracking this bin (within the dedup radius) or claim

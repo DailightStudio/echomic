@@ -144,7 +144,7 @@ static void stages(float voicePeak, double vib = 0.01, bool melody = false) {
 }
 
 int main() {
-    
+    stages(0.25f); stages(0.25f, 0.03); stages(0.25f, 0.01, true); stages(0.25f, 0.03, true); stages(0.03f, 0.02, true);
     printf("loop  | def(sup on) | sup off | shift on | sup off+shift | boost | boost+shift"); putchar(10);
     for (float L = -15; L <= 6.01f; L += 3) {
         float t, r[6], mx[6];

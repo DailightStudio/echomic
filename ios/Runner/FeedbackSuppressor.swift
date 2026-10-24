@@ -14,8 +14,8 @@ import Foundation
 ///      that tower over the spectral *median* (robust against loud tonal peaks).
 ///   3. Each peak becomes a howl candidate that must pass multi-criteria
 ///      validation before arming a notch — persistence over consecutive cycles
-///      (IPMP), magnitude growth, and missing 2nd/3rd harmonics (PHPR), which
-///      together separate feedback from voiced speech/music.
+///      (IPMP), magnitude growth, and no neighbouring harmonic at f0 = bin/k
+///      (`isHarmonicOfVoice`), which together separate feedback from voice.
 ///   4. A notch that has not been refreshed within `kHoldSeconds` is released
 ///      so the affected band reopens once the feedback is gone.
 ///
@@ -36,8 +36,11 @@ final class FeedbackSuppressor {
     private static let kMaxCandidates: Int    = 24
     private static let kMinHitCount: Int      = 6      // IPMP: ~32 ms persistence
     private static let kGrowthMinRatio: Float = 1.0    // latest >= running average
-    private static let kHarmonic2Ratio: Float = 0.6    // PHPR thresholds (power)
-    private static let kHarmonic3Ratio: Float = 0.4
+    // Harmonic-series test (power ratio, ~-10 dB): a sung note is a ladder of
+    // peaks spaced f0 apart, a howl is a lone sinusoid.
+    private static let kNeighborRatio: Float  = 0.1
+    private static let kMaxHarmonicOrder: Int = 8
+    private static let kMinF0Bins: Float      = 2.0    // ~94 Hz @ 48 kHz
 
     // Constant absolute notch bandwidth (Hz) -> Q varies with frequency, so
     // low howls get a proportionally wide notch and high howls stay surgical.
@@ -419,20 +422,39 @@ final class FeedbackSuppressor {
             return false
         }
 
-        // PHPR: voiced speech carries strong 2nd/3rd harmonics; a howl is a
-        // near-pure sinusoid. Comparable energy at 2f or 3f -> treat as voice.
-        let m = candidates[idx].lastMagnitude
-        let bin2 = bin * 2
-        let bin3 = bin * 3
-        if bin2 + 1 < half {
-            let h2 = max(magnitudes[bin2 - 1], max(magnitudes[bin2], magnitudes[bin2 + 1]))
-            if h2 > m * FeedbackSuppressor.kHarmonic2Ratio { return false }
+        return !isHarmonicOfVoice(bin: bin, half: half, m: candidates[idx].lastMagnitude)
+    }
+
+    /// Voice: the peak is the k-th harmonic of some f0 = bin/k and BOTH
+    /// neighbouring harmonics (k-1 and k+1; for k = 1 just 2f) carry
+    /// comparable energy. One neighbour is not enough: a second room
+    /// resonance next to a growing howl looks like one (2200 + 3100 Hz room
+    /// kept howling in tools/dsp_sim with the one-sided test). Upper
+    /// harmonics roll off (~1/k^2 in power), so the old 2f/3f-only test
+    /// (needing h2 >= 0.6x) called nearly every sung harmonic a howl and
+    /// notched the voice 8-15 dB (tools/dsp_sim). A real howl grows until it
+    /// dominates its neighbours, so it still fails this test in time.
+    private func isHarmonicOfVoice(bin: Int, half: Int, m: Float) -> Bool {
+        for k in 1...FeedbackSuppressor.kMaxHarmonicOrder {
+            let f0 = Float(bin) / Float(k)
+            if f0 < FeedbackSuppressor.kMinF0Bins { break }
+            // +-1 bin search only when f0 clears the Hann main lobe (+-2 bins).
+            let r = f0 >= 4.0 ? 1 : 0
+            let up = Int(Float(bin) + f0 + 0.5)
+            let down = Int(Float(bin) - f0 + 0.5)
+            let limit = m * FeedbackSuppressor.kNeighborRatio
+            if neighborPower(center: up, radius: r, half: half) <= limit { continue }
+            if k == 1 || neighborPower(center: down, radius: r, half: half) > limit { return true }
         }
-        if bin3 + 1 < half {
-            let h3 = max(magnitudes[bin3 - 1], max(magnitudes[bin3], magnitudes[bin3 + 1]))
-            if h3 > m * FeedbackSuppressor.kHarmonic3Ratio { return false }
+        return false
+    }
+
+    private func neighborPower(center: Int, radius: Int, half: Int) -> Float {
+        var p: Float = 0
+        for b in (center - radius)...(center + radius) where b >= 1 && b < half {
+            p = max(p, magnitudes[b])
         }
-        return true
+        return p
     }
 
     /// Find the candidate tracking this bin (within the dedup radius) or claim
